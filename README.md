@@ -80,3 +80,10 @@ Output stack shape: `(T, H, W)` float32 (image convention). BLITZ loads via
 | `evt_sidecar/app.py` | Entry / CLI |
 
 Contract reference: [`../WOLKE/BLITZ_Receiver_Contract.md`](../WOLKE/BLITZ_Receiver_Contract.md).
+
+## Backlog (framework)
+
+Dense EVT bins are mostly zeros — same class of problem as other thin scientific
+volumes in WETTER. See
+[`../WETTER/docs/sparse_matrices.md`](../WETTER/docs/sparse_matrices.md)
+(compression first; optional threshold = signal loss; sparse-native analysis later).
