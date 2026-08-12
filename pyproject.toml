@@ -1,0 +1,29 @@
+[project]
+name = "evt-sidecar"
+version = "0.1.0"
+description = "IDS/Prophesee EVT3 sidecar: dynamic event binning → BLITZ via WOLKE contract"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "numba>=0.59",
+    "flask>=3.0",
+    "flask-socketio>=5.3",
+    "eventlet>=0.35",
+    "PyQt6>=6.6",
+]
+
+[project.scripts]
+evt-sidecar = "evt_sidecar.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["evt_sidecar"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]

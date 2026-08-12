@@ -1,0 +1,139 @@
+"""Accumulate CD events into a dense (T, H, W) frame stack for BLITZ."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+import numpy as np
+
+from .evt3 import EventStore
+
+
+class PolarityMode(str, Enum):
+    ON = "on"
+    OFF = "off"
+    BOTH = "both"
+    SIGNED = "signed"  # ON=+1, OFF=-1
+
+
+class AccumMode(str, Enum):
+    COUNT = "count"
+
+
+@dataclass
+class BinParams:
+    dt_us: int = 1000
+    polarity: PolarityMode = PolarityMode.BOTH
+    accum: AccumMode = AccumMode.COUNT
+    t0_us: int | None = None  # absolute; None = store.t_min
+    t1_us: int | None = None  # absolute; None = store.t_max
+    max_frames: int | None = 2000  # safety cap for RAM / Network transfer
+
+    def clamp_dt(self) -> int:
+        return max(1, int(self.dt_us))
+
+
+def bin_events(store: EventStore, params: BinParams) -> np.ndarray:
+    """
+    Return float32 stack shaped (T, height, width) — OpenCV/image convention.
+    BLITZ DataLoader swapaxes(1,2) → ImageData (T, W, H).
+    """
+    if len(store) == 0:
+        return np.zeros((1, store.height, store.width), dtype=np.float32)
+
+    dt = params.clamp_dt()
+    t0 = store.t_min if params.t0_us is None else int(params.t0_us)
+    t1 = store.t_max if params.t1_us is None else int(params.t1_us)
+    if t1 < t0:
+        t0, t1 = t1, t0
+
+    # Slice events in [t0, t1]
+    t = store.t
+    lo = int(np.searchsorted(t, t0, side="left"))
+    hi = int(np.searchsorted(t, t1, side="right"))
+    if hi <= lo:
+        return np.zeros((1, store.height, store.width), dtype=np.float32)
+
+    t_s = t[lo:hi]
+    x_s = store.x[lo:hi]
+    y_s = store.y[lo:hi]
+    p_s = store.p[lo:hi]
+
+    # Polarity filter / weights
+    if params.polarity == PolarityMode.ON:
+        mask = p_s == 1
+        weights = np.ones(mask.sum(), dtype=np.float32)
+        t_s, x_s, y_s = t_s[mask], x_s[mask], y_s[mask]
+    elif params.polarity == PolarityMode.OFF:
+        mask = p_s == 0
+        weights = np.ones(mask.sum(), dtype=np.float32)
+        t_s, x_s, y_s = t_s[mask], x_s[mask], y_s[mask]
+    elif params.polarity == PolarityMode.SIGNED:
+        weights = np.where(p_s == 1, 1.0, -1.0).astype(np.float32)
+    else:
+        weights = np.ones(t_s.shape[0], dtype=np.float32)
+
+    if t_s.shape[0] == 0:
+        return np.zeros((1, store.height, store.width), dtype=np.float32)
+
+    # Frame index relative to t0
+    frame_idx = ((t_s.astype(np.int64) - t0) // dt).astype(np.int64)
+    n_frames = int(frame_idx.max()) + 1
+    if params.max_frames is not None and n_frames > params.max_frames:
+        # Keep earliest max_frames bins
+        keep = frame_idx < params.max_frames
+        frame_idx = frame_idx[keep]
+        x_s = x_s[keep]
+        y_s = y_s[keep]
+        weights = weights[keep]
+        n_frames = params.max_frames
+
+    h, w = store.height, store.width
+    # Drop out-of-bounds coordinates
+    inb = (x_s < w) & (y_s < h)
+    frame_idx = frame_idx[inb]
+    x_s = x_s[inb]
+    y_s = y_s[inb]
+    weights = weights[inb]
+
+    stack = np.zeros((n_frames, h, w), dtype=np.float32)
+    # Flat index: frame * H*W + y * W + x
+    flat = frame_idx * (h * w) + y_s.astype(np.int64) * w + x_s.astype(np.int64)
+    np.add.at(stack.ravel(), flat, weights)
+    return stack
+
+
+def stack_for_network(stack: np.ndarray) -> np.ndarray:
+    """
+    Compact float stack → uint8 for WOLKE/BLITZ HTTP transfer.
+
+    Sparse event counts are heavy-tailed (max ≫ typical). Linear min–max mapping
+    rounds almost all pixels to 0 — use log1p (+ high percentile clip) instead.
+    """
+    arr = np.asarray(stack, dtype=np.float32)
+    if arr.size == 0:
+        return arr.astype(np.uint8)
+
+    amin = float(arr.min())
+    amax = float(arr.max())
+    if amin < 0.0 < amax:
+        # Signed: log-magnitude around mid-grey
+        mag = np.log1p(np.abs(arr))
+        m = float(np.percentile(mag, 99.5)) if mag.size else 0.0
+        m = max(m, 1e-6)
+        scaled = np.sign(arr) * (mag / m) * 127.0 + 128.0
+        return np.clip(scaled, 0, 255).astype(np.uint8)
+
+    if amax <= amin:
+        return np.zeros(arr.shape, dtype=np.uint8)
+
+    # Non-negative counts: log1p, clip to p99.5 of positive pixels
+    logged = np.log1p(np.maximum(arr, 0.0))
+    pos = logged[logged > 0]
+    if pos.size == 0:
+        return np.zeros(arr.shape, dtype=np.uint8)
+    hi = float(np.percentile(pos, 99.5))
+    hi = max(hi, 1e-6)
+    scaled = (logged / hi) * 255.0
+    return np.clip(scaled, 0, 255).astype(np.uint8)
