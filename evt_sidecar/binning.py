@@ -105,6 +105,14 @@ def bin_events(store: EventStore, params: BinParams) -> np.ndarray:
 
 
 HARD_FRAME_CAP = 2000
+SENSOR_DT_US = 1  # EVT3 timestamp tick
+OVERVIEW_PICTURES = 150
+
+
+def min_dt_us(window_us: int, cap: int = HARD_FRAME_CAP) -> int:
+    """Finest frame time that still fits `cap` pictures (not below 1 µs)."""
+    window_us = max(1, int(window_us))
+    return max(SENSOR_DT_US, int((window_us + cap - 1) // cap))
 
 
 def plan_pictures(

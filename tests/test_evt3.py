@@ -133,6 +133,14 @@ def test_plan_pictures() -> None:
     assert n == HARD_FRAME_CAP
 
 
+def test_min_dt_us() -> None:
+    from evt_sidecar.binning import min_dt_us
+
+    assert min_dt_us(1_500_000) == 750  # 1500 ms / 2000 pictures
+    assert min_dt_us(100) == 1
+
+
+
 def test_event_rate_ms() -> None:
     from evt_sidecar.binning import event_rate_ms
     from evt_sidecar.raw_header import RawHeader
