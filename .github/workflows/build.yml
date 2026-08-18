@@ -1,0 +1,145 @@
+name: Build Event reader
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "build*"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Test
+        run: uv sync --group dev && uv run pytest -q
+
+  windows:
+    needs: [test]
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        shell: pwsh
+        run: pip install uv
+      - name: Sync dependencies
+        shell: pwsh
+        run: uv sync --group dev
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $p = Get-Content -Raw -Encoding UTF8 pyproject.toml
+          $m = [regex]::Match($p, '(?m)^\s*version\s*=\s*"([^"]+)"')
+          if (-not $m.Success) { throw "Could not find version in pyproject.toml" }
+          "version=$($m.Groups[1].Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Create release tag name
+        id: tag
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          "tag=build-$v-${{ github.run_number }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: uv run pyinstaller EventReader.spec --noconfirm --clean
+      - name: Verify output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/EventReader.exe)) {
+            Write-Error "dist/EventReader.exe not found"
+            exit 1
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EventReader-Windows
+          path: dist/EventReader.exe
+
+  linux:
+    needs: [test]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglx-mesa0 libxcb-cursor0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Sync dependencies
+        run: uv sync --group dev
+      - name: Read version
+        id: ver
+        run: |
+          python -c "import re; print('version=' + re.search(r'(?m)^version\s*=\s*\"([^\"]+)\"', open('pyproject.toml').read()).group(1))" >> $GITHUB_OUTPUT
+      - name: Create release tag name
+        id: tag
+        run: |
+          echo "tag=build-${{ steps.ver.outputs.version }}-${{ github.run_number }}" >> $GITHUB_OUTPUT
+      - name: Build with PyInstaller
+        run: uv run pyinstaller EventReader.spec --noconfirm --clean
+      - name: Verify output
+        run: |
+          test -f dist/EventReader
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EventReader-Linux
+          path: dist/EventReader
+
+  release:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/build')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: EventReader-Windows
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: EventReader-Linux
+          path: dist
+      - name: Create tag (manual run only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          tag="${{ needs.windows.outputs.tag }}"
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git fetch --tags origin
+          git tag "$tag" "${{ github.sha }}"
+          git push origin "$tag"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && needs.windows.outputs.tag || github.ref_name }}
+          name: Event reader ${{ needs.windows.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/EventReader.exe
+            dist/EventReader
+          fail_on_unmatched_files: true
+          body: |
+            Working-title **Event reader** (EVT3 `.raw` → BLITZ via WOLKE contract).
+            Not FUNKE. Not part of the BLITZ Flatpak.
+
+            1. Run `EventReader` / `EventReader.exe` (optional path to a `.raw` file).
+            2. In BLITZ → Network: `http://127.0.0.1:5055`, token `evt`.

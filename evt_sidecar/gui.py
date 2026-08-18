@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
         initial_raw: Path | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("EVT Sidecar → BLITZ")
+        self.setWindowTitle("Event reader → BLITZ")
         self.resize(520, 480)
 
         self._store: EventStore | None = None
