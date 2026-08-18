@@ -146,6 +146,49 @@ def event_rate_ms(store: EventStore, n_bins: int = 400) -> tuple[np.ndarray, np.
     return x_ms, counts.astype(np.float64)
 
 
+def encode_stack_for_send(
+    stack: np.ndarray,
+    *,
+    eight_bit: bool = False,
+    log_stretch: bool = False,
+    normalize: bool = False,
+    grayscale: bool = False,
+) -> np.ndarray:
+    """Apply File-tab-like options, then optionally pack to uint8.
+
+    Default: float32 event counts (no 255 clip). 8-bit / log stretch / normalize
+    match the BLITZ File tab knobs so sidecar and Stream stay consistent.
+    """
+    arr = np.asarray(stack, dtype=np.float32)
+    if grayscale and arr.ndim == 4 and arr.shape[-1] == 3:
+        weights = np.array([0.2989, 0.5870, 0.1140], dtype=np.float32)
+        arr = np.sum(arr * weights, axis=-1).astype(np.float32)
+    if not eight_bit:
+        if normalize:
+            return _normalize_per_frame(arr, uint8=False)
+        return arr
+    if log_stretch:
+        return stack_for_network(arr, log_stretch=True)
+    if normalize:
+        return _normalize_per_frame(arr, uint8=True)
+    return stack_for_network(arr, log_stretch=False)
+
+
+def _normalize_per_frame(arr: np.ndarray, *, uint8: bool) -> np.ndarray:
+    out_dtype = np.uint8 if uint8 else np.float32
+    hi = 255.0 if uint8 else 1.0
+    frames = []
+    for frame in arr:
+        lo = float(frame.min())
+        span = float(frame.max()) - lo
+        if span <= 0:
+            frames.append(np.zeros(frame.shape, dtype=out_dtype))
+            continue
+        scaled = (frame - lo) / span * hi
+        frames.append(np.clip(scaled, 0, hi).astype(out_dtype))
+    return np.stack(frames, axis=0)
+
+
 def stack_for_network(stack: np.ndarray, *, log_stretch: bool = False) -> np.ndarray:
     """
     Compact float stack → uint8 for WOLKE/BLITZ HTTP transfer.

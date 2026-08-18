@@ -32,6 +32,9 @@ def test_parse_header(tmp_path: Path) -> None:
     assert h.height == 720
     assert h.header_bytes == len(header)
     assert "EVT3" in h.format_name.upper()
+    assert h.source_lines[0].startswith("% ")
+    assert h.source_lines[-1] == "% end"
+    assert any("format EVT3" in line for line in h.source_lines)
 
 
 def test_decode_single_event() -> None:
@@ -118,6 +121,22 @@ def test_stack_for_network_uint8() -> None:
     assert int(s[0, 0, 1]) == 128
     assert int(s[0, 0, 0]) == 126
     assert int(s[0, 0, 2]) == 130
+
+
+def test_encode_stack_sends_float_counts_by_default() -> None:
+    from evt_sidecar.binning import encode_stack_for_send
+
+    counts = np.zeros((1, 4, 4), dtype=np.float32)
+    counts[0, 1, 1] = 1.0
+    counts[0, 2, 2] = 6.0
+    out = encode_stack_for_send(counts)
+    assert out.dtype == np.float32
+    assert out[0, 1, 1] == pytest.approx(1.0)
+    assert out[0, 2, 2] == pytest.approx(6.0)
+
+    packed = encode_stack_for_send(counts, eight_bit=True)
+    assert packed.dtype == np.uint8
+    assert int(packed[0, 2, 2]) == 6
 
 
 def test_plan_pictures() -> None:

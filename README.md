@@ -6,26 +6,19 @@ in [BLITZ](https://github.com/PiMaV/BLITZ) as a normal image stack.
 Work in order. Nothing is sent to BLITZ until you click **Build pictures and
 send to BLITZ**.
 
-1. **Open** a `.raw` file. The reader builds a coarse **overview** (~150 pictures
-   of the whole recording, local only).
+1. **Open** a `.raw` file. The reader shows the **RAW header and first events**
+   (about ten lines) plus a coarse **overview** (~150 pictures, local only).
 2. **Scrub** on the timeline under the image (click, drag the white playhead, or
    mouse wheel). Time is **seconds from the first event in this file**, not
    wall-clock — EVT3 ticks are 1 µs, but the file does not store when you pressed
    record.
 3. Drag the **yellow band** to set start → end of the range you will send.
-4. Set **frame time (Δt)** — how long each picture for BLITZ integrates. Sensor
-   resolution is 1 µs (0.001 ms). There is **no hard picture count**. The planned
-   uint8 stack is compared to this PC's RAM: **yellow ≥ 1/8** (send anyway),
-   **red ≥ 1/4** (confirm). Independently, **more than 1000 pictures** is allowed
-   but not comfortable in BLITZ (timeline too fine) — the panel turns yellow
-   (`MANY PICTURES`) and send asks once. The RAM panel fills **yellow or red**
-   so the size is obvious; the send button uses the same colour. Send is refused
-   only if the pictures would not fit in free RAM. Building uses ~4× RAM
-   (float32) before the uint8 send.
+4. Set **frame time (Δt)** and File-tab-like **8-bit / Normalize / Grayscale**
+   (defaults: float32 counts, no 8-bit clip). RAM yellow ≥ 1/8, red ≥ 1/4;
+   more than 1000 pictures is allowed but uncomfortable in BLITZ.
 5. Connect BLITZ → Network (`http://127.0.0.1:5055`, token `evt`), then send.
-   Green status = BLITZ downloaded the stack. **Gzip** is a checkbox, default
-   off (only useful on a weak network). Pictures are **raw event counts**
-   (clipped at 255); optional **Log stretch** squeezes outliers into 0…255.
+   BLITZ File-tab options apply on Connect too (including Floor). **Gzip** is a
+   checkbox, default off. Optional **Log stretch** only with 8-bit.
 
 ## Run
 

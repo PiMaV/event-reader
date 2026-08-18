@@ -14,6 +14,7 @@ class RawHeader:
     evt_version: str
     metadata: dict[str, str] = field(default_factory=dict)
     header_bytes: int = 0
+    source_lines: list[str] = field(default_factory=list)
 
     @property
     def geometry(self) -> tuple[int, int]:
@@ -24,6 +25,7 @@ def parse_raw_header(path: Path | str) -> RawHeader:
     """Read ASCII header until '% end'; return geometry and byte offset of payload."""
     path = Path(path)
     metadata: dict[str, str] = {}
+    source_lines: list[str] = []
     header_bytes = 0
     with path.open("rb") as f:
         while True:
@@ -34,6 +36,7 @@ def parse_raw_header(path: Path | str) -> RawHeader:
             if not line.startswith(b"%"):
                 raise ValueError(f"Expected '%' header line in {path}, got {line[:40]!r}")
             text = line[1:].decode("ascii", errors="replace").strip()
+            source_lines.append("% " + text if not text.lower() == "end" else "% end")
             if text.lower() == "end":
                 break
             if " " not in text:
@@ -70,4 +73,5 @@ def parse_raw_header(path: Path | str) -> RawHeader:
         evt_version=metadata.get("evt", ""),
         metadata=metadata,
         header_bytes=header_bytes,
+        source_lines=source_lines,
     )

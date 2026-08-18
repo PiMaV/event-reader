@@ -14,22 +14,22 @@ def test_fmt_bytes() -> None:
 def test_levels_16gb_hd_stack() -> None:
     # 1280×720 uint8: 500 frames ≈ 0.44 GiB → ~2.7% of 16 GB → ok
     ram = RamSnapshot(total=16 * 1024**3, available=16 * 1024**3)
-    ok = assess_stack(500, 720, 1280, ram)
+    ok = assess_stack(500, 720, 1280, ram, wire_itemsize=1)
     assert ok.level == "ok"
     assert not ok.nav_warn
     assert ok.wire_bytes == payload_bytes(500, 720, 1280, 1)
 
-    yellow = assess_stack(3000, 720, 1280, ram)  # ~2.64 GiB ≈ 16.5%
+    yellow = assess_stack(3000, 720, 1280, ram, wire_itemsize=1)
     assert yellow.level == "yellow"
     assert yellow.nav_warn
 
-    red = assess_stack(5000, 720, 1280, ram)  # ~4.4 GiB ≈ 27.5%
+    red = assess_stack(5000, 720, 1280, ram, wire_itemsize=1)
     assert red.level == "red"
 
 
 def test_nav_warn_above_1000_even_when_ram_ok() -> None:
     ram = RamSnapshot(total=16 * 1024**3, available=16 * 1024**3)
-    budget = assess_stack(1500, 720, 1280, ram)
+    budget = assess_stack(1500, 720, 1280, ram, wire_itemsize=1)
     assert budget.nav_warn
     assert budget.ram_level == "ok"
     assert budget.level == "yellow"
@@ -39,7 +39,7 @@ def test_nav_warn_above_1000_even_when_ram_ok() -> None:
 def test_block_when_wire_exceeds_free() -> None:
     ram = RamSnapshot(total=32 * 1024**3, available=500 * 1024**2)
     # 800 frames × 720 × 1280 ≈ 703 MB uint8 > 90% of 500 MB
-    blocked = assess_stack(800, 720, 1280, ram)
+    blocked = assess_stack(800, 720, 1280, ram, wire_itemsize=1)
     assert blocked.level == "block"
 
 
@@ -57,6 +57,6 @@ def test_banner_theme_is_loud() -> None:
 def test_escalate_to_red_when_build_is_tight() -> None:
     # uint8 well under 1/8 of 64 GB, but float32 (~4×) exceeds 90% of a small free pool
     ram = RamSnapshot(total=64 * 1024**3, available=700 * 1024**2)
-    budget = assess_stack(200, 720, 1280, ram)
+    budget = assess_stack(200, 720, 1280, ram, wire_itemsize=1)
     assert budget.fraction_of_total < 1 / 8
     assert budget.level == "red"

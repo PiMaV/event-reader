@@ -6,15 +6,15 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
-# uint8 on the wire to BLITZ; float32 while binning locally
-WIRE_BYTES_PER_PIXEL = 1
+# Default wire is float32 event counts; 8-bit send uses 1 byte/px
+WIRE_BYTES_PER_PIXEL = 4
 BUILD_BYTES_PER_PIXEL = 4
 
 # Fractions of *installed* RAM (MemTotal / ullTotalPhys)
 YELLOW_FRAC = 1 / 8
 RED_FRAC = 1 / 4
 
-# Refuse if the uint8 stack itself would not fit in *free* RAM
+# Refuse if the wire stack itself would not fit in *free* RAM
 WIRE_AVAILABLE_FRAC = 0.90
 
 # BLITZ timeline: more frames still work, but scrubbing stops being comfortable
@@ -143,17 +143,20 @@ def assess_stack(
     height: int,
     width: int,
     ram: RamSnapshot | None = None,
+    *,
+    wire_itemsize: int = 4,
 ) -> StackBudget:
     """
-    Colour the planned uint8 stack against installed RAM.
+    Colour the planned stack against installed RAM (default float32 = 4 bytes/px).
 
     Yellow / red use the user's fractions of *total* RAM (stable).
-    ``block`` if the uint8 stack itself would not fit in *available* RAM.
+    ``block`` if the wire stack itself would not fit in *available* RAM.
     If the float32 build buffer is tight on free RAM, escalate to red (confirm).
     """
     ram = ram if ram is not None else read_ram()
     n = max(1, int(n_frames))
-    wire = payload_bytes(n, height, width, WIRE_BYTES_PER_PIXEL)
+    item = max(1, int(wire_itemsize))
+    wire = payload_bytes(n, height, width, item)
     build = payload_bytes(n, height, width, BUILD_BYTES_PER_PIXEL)
     frac = wire / ram.total if ram.total > 0 else 0.0
     if ram.available > 0 and wire > WIRE_AVAILABLE_FRAC * ram.available:

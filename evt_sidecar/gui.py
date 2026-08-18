@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QStatusBar,
@@ -37,9 +38,9 @@ from .binning import (
     BinParams,
     PolarityMode,
     bin_events,
+    encode_stack_for_send,
     event_rate_ms,
     plan_pictures,
-    stack_for_network,
 )
 from .evt3 import EventStore, load_evt3_raw
 from .ram import (
@@ -239,6 +240,23 @@ class _RamBanner(QFrame):
         )
 
 
+def _file_preview_text(store: EventStore, n_header: int = 10, n_events: int = 8) -> str:
+    """First header lines of the RAW plus a few decoded events (scientist orientation)."""
+    lines = list(store.header.source_lines[:n_header])
+    if len(store.header.source_lines) > n_header:
+        lines.append("…")
+    n_show = min(n_events, len(store))
+    if n_show:
+        lines.append("")
+        lines.append("# first events    t[µs]    x    y  polarity")
+        for i in range(n_show):
+            pol = "ON" if int(store.p[i]) else "OFF"
+            lines.append(
+                f"{int(store.t[i]):16d}  {int(store.x[i]):4d}  {int(store.y[i]):4d}  {pol}"
+            )
+    return "\n".join(lines)
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -301,6 +319,12 @@ class MainWindow(QMainWindow):
         self.meta_label = QLabel("No file loaded.")
         self.meta_label.setWordWrap(True)
         layout.addWidget(self.meta_label)
+        self.file_preview = QPlainTextEdit()
+        self.file_preview.setReadOnly(True)
+        self.file_preview.setMaximumHeight(150)
+        self.file_preview.setPlaceholderText("RAW header and first events appear here.")
+        self.file_preview.setFont(QFont("monospace", 9))
+        layout.addWidget(self.file_preview)
 
         step1 = QGroupBox("1 — Overview (local only, not sent to BLITZ)")
         s1 = QVBoxLayout(step1)
@@ -371,12 +395,39 @@ class MainWindow(QMainWindow):
             self.polarity.addItem(mode.value, mode)
         self.polarity.setCurrentIndex(2)
         form.addRow("Polarity", self.polarity)
+        self.eight_bit = QCheckBox("8-bit")
+        self.eight_bit.setChecked(False)
+        self.eight_bit.setToolTip(
+            "Off (default): send float32 event counts to BLITZ. "
+            "On: pack to uint8 here (same idea as the BLITZ File tab)."
+        )
+        self.eight_bit.toggled.connect(self._on_encode_options_changed)
+        self.normalize_box = QCheckBox("Normalize")
+        self.normalize_box.setChecked(False)
+        self.normalize_box.setToolTip(
+            "Per-picture min–max stretch. Same idea as the BLITZ File tab. "
+            "BLITZ can still apply File-tab options again on Connect."
+        )
+        self.normalize_box.toggled.connect(self._refresh_plan_label)
+        self.grayscale_box = QCheckBox("Grayscale")
+        self.grayscale_box.setChecked(True)
+        self.grayscale_box.setToolTip(
+            "Event pictures are already one channel; this matches the File tab "
+            "and only changes RGB stacks."
+        )
+        encode_wrap = QWidget()
+        encode_row = QHBoxLayout(encode_wrap)
+        encode_row.setContentsMargins(0, 0, 0, 0)
+        encode_row.addWidget(self.eight_bit)
+        encode_row.addWidget(self.normalize_box)
+        encode_row.addWidget(self.grayscale_box)
+        form.addRow("Send like File tab", encode_wrap)
         self.log_stretch = QCheckBox("Log stretch (log1p → 0…255)")
         self.log_stretch.setChecked(False)
+        self.log_stretch.setEnabled(False)
         self.log_stretch.setToolTip(
-            "Off (default): send raw event counts, clipped at 255. "
-            "On: squeeze the range so a few hot pixels do not crush the rest. "
-            "Applies to the next overview and to the next send."
+            "Only with 8-bit. Squeeze outliers into 0…255 so a few hot pixels "
+            "do not crush typical counts."
         )
         form.addRow(self.log_stretch)
         s2.addLayout(form)
@@ -434,6 +485,13 @@ class MainWindow(QMainWindow):
             "Then use the button above."
         )
 
+    def _on_encode_options_changed(self) -> None:
+        eight = self.eight_bit.isChecked()
+        self.log_stretch.setEnabled(eight)
+        if not eight:
+            self.log_stretch.setChecked(False)
+        self._refresh_plan_label()
+
     def _on_gzip_toggled(self, checked: bool) -> None:
         self.publisher.gzip_enabled = bool(checked)
 
@@ -490,6 +548,7 @@ class MainWindow(QMainWindow):
         self.playhead.blockSignals(False)
         self.region.blockSignals(False)
         self.time_plot.setXRange(0.0, dur_s, padding=0.02)
+        self.file_preview.setPlainText(_file_preview_text(store))
         self.led.set_state("work", f"1/3 Building ~{OVERVIEW_PICTURES}-picture overview…")
         self._start_bin(self._overview_params(), "overview")
 
@@ -595,7 +654,10 @@ class MainWindow(QMainWindow):
         t0_s = (t0 - self._store.t_min) / 1_000_000.0
         t1_s = (t1 - self._store.t_min) / 1_000_000.0
         ram = read_ram()
-        budget = assess_stack(n, self._store.height, self._store.width, ram)
+        itemsize = 1 if self.eight_bit.isChecked() else 4
+        budget = assess_stack(
+            n, self._store.height, self._store.width, ram, wire_itemsize=itemsize
+        )
         self._stack_budget = budget
         y_b = YELLOW_FRAC * ram.total
         r_b = RED_FRAC * ram.total
@@ -682,7 +744,13 @@ class MainWindow(QMainWindow):
 
     def _on_binned(self, stack: object, elapsed: float, kind: str) -> None:
         arr = np.asarray(stack)
-        net = stack_for_network(arr, log_stretch=self.log_stretch.isChecked())
+        net = encode_stack_for_send(
+            arr,
+            eight_bit=self.eight_bit.isChecked(),
+            log_stretch=self.log_stretch.isChecked(),
+            normalize=self.normalize_box.isChecked(),
+            grayscale=self.grayscale_box.isChecked(),
+        )
         if kind == "overview":
             self._overview = net
             n = net.shape[0]
