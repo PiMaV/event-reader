@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import io
 import time
 import urllib.request
@@ -33,8 +34,37 @@ def test_publisher_push_and_download() -> None:
             f"http://127.0.0.1:5067/evt?filename={STACK_NAME}", timeout=5
         ) as resp:
             body = resp.read()
+            assert resp.headers.get("Content-Encoding") != "gzip"
         arr = np.load(io.BytesIO(body))
         assert arr.shape == stack.shape
         assert np.allclose(arr, stack)
     finally:
         test_client.disconnect()
+
+
+def test_publisher_gzip_is_opt_in() -> None:
+    pub = StackPublisher(host="127.0.0.1", port=5068, token="evt")
+    stack = np.zeros((16, 32, 32), dtype=np.uint8)
+    stack[0, 0, 0] = 1
+    stack[3, 10, 10] = 255
+    pub.set_stack(stack, push=False)
+
+    client = pub._app.test_client()
+    # BLITZ/requests always send Accept-Encoding: gzip — that alone must not zip
+    identity = client.get(
+        f"/evt?filename={STACK_NAME}",
+        headers={"Accept-Encoding": "gzip"},
+    )
+    assert identity.status_code == 200
+    assert identity.headers.get("Content-Encoding") != "gzip"
+    ident = np.load(io.BytesIO(identity.data))
+    assert np.array_equal(ident, stack)
+
+    zipped = client.get(f"/evt?filename={STACK_NAME}&gzip=1")
+    assert zipped.status_code == 200
+    assert zipped.headers.get("Content-Encoding") == "gzip"
+    raw = gzip.decompress(zipped.data)
+    arr = np.load(io.BytesIO(raw))
+    assert arr.shape == stack.shape
+    assert np.array_equal(arr, stack)
+    assert len(zipped.data) < len(raw)

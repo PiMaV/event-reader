@@ -97,48 +97,44 @@ def test_bin_signed() -> None:
 def test_stack_for_network_uint8() -> None:
     from evt_sidecar.binning import stack_for_network
 
-    # Sparse heavy-tailed counts: linear min-max would zero almost everything
     counts = np.zeros((1, 4, 4), dtype=np.float32)
     counts[0, 1, 1] = 1.0
     counts[0, 2, 2] = 3.0
     counts[0, 3, 3] = 8000.0
-    u = stack_for_network(counts)
-    assert u.dtype == np.uint8
-    assert u.shape == counts.shape
-    assert int(u[0, 1, 1]) > 0
-    assert int(u[0, 2, 2]) > int(u[0, 1, 1])
+    raw = stack_for_network(counts)
+    assert raw.dtype == np.uint8
+    assert int(raw[0, 1, 1]) == 1
+    assert int(raw[0, 2, 2]) == 3
+    assert int(raw[0, 3, 3]) == 255
+
+    logged = stack_for_network(counts, log_stretch=True)
+    assert int(logged[0, 1, 1]) > 0
+    assert int(logged[0, 2, 2]) > int(logged[0, 1, 1])
+    assert int(logged[0, 3, 3]) == 255
 
     signed = np.array([[[-2.0, 0.0, 2.0]]], dtype=np.float32)
     s = stack_for_network(signed)
     assert s.dtype == np.uint8
     assert int(s[0, 0, 1]) == 128
+    assert int(s[0, 0, 0]) == 126
+    assert int(s[0, 0, 2]) == 130
 
 
 def test_plan_pictures() -> None:
-    from evt_sidecar.binning import HARD_FRAME_CAP, plan_pictures
+    from evt_sidecar.binning import plan_pictures
 
-    dt, n, capped, used = plan_pictures(1_500_000, dt_us=1000)
+    dt, n, used = plan_pictures(1_500_000, dt_us=1000)
     assert dt == 1000
     assert n == 1500
-    assert not capped
     assert used == 1_500_000
 
-    dt, n, capped, used = plan_pictures(1_500_000, n_frames=150)
+    dt, n, used = plan_pictures(1_500_000, n_frames=150)
     assert n == 150
     assert dt == 10_000
-    assert not capped
 
-    dt, n, capped, _used = plan_pictures(10_000_000, dt_us=1000)
-    assert capped
-    assert n == HARD_FRAME_CAP
-
-
-def test_min_dt_us() -> None:
-    from evt_sidecar.binning import min_dt_us
-
-    assert min_dt_us(1_500_000) == 750  # 1500 ms / 2000 pictures
-    assert min_dt_us(100) == 1
-
+    dt, n, used = plan_pictures(10_000_000, dt_us=1000)
+    assert n == 10_000
+    assert used == 10_000_000
 
 
 def test_event_rate_ms() -> None:

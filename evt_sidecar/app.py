@@ -48,8 +48,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-frames",
         type=int,
-        default=2000,
-        help="Frame cap (with --export-npy)",
+        default=0,
+        help="Optional hard picture cap (0 = none; RAM warnings are GUI-only)",
     )
     args = parser.parse_args(argv)
 
@@ -86,10 +86,11 @@ def _export_headless(args: argparse.Namespace) -> int:
         print("error: RAW path required with --export-npy", file=sys.stderr)
         return 2
     store = load_evt3_raw(args.raw)
+    cap = args.max_frames if args.max_frames > 0 else None
     params = BinParams(
         dt_us=max(1, int(round(args.dt_ms * 1000.0))),
         polarity=PolarityMode(args.polarity),
-        max_frames=args.max_frames,
+        max_frames=cap,
     )
     stack = bin_events(store, params)
     out: Path = args.export_npy

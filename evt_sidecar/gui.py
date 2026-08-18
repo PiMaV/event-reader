@@ -8,10 +8,11 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtCore import QEvent, QObject, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QWheelEvent
 from PyQt6.QtWidgets import (
     QComboBox,
+    QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -30,7 +31,6 @@ from PyQt6.QtWidgets import (
 )
 
 from .binning import (
-    HARD_FRAME_CAP,
     OVERVIEW_PICTURES,
     SENSOR_DT_US,
     AccumMode,
@@ -38,11 +38,20 @@ from .binning import (
     PolarityMode,
     bin_events,
     event_rate_ms,
-    min_dt_us,
     plan_pictures,
     stack_for_network,
 )
 from .evt3 import EventStore, load_evt3_raw
+from .ram import (
+    FILL_COLOR,
+    NAV_WARN_FRAMES,
+    RED_FRAC,
+    YELLOW_FRAC,
+    StackBudget,
+    assess_stack,
+    fmt_bytes,
+    read_ram,
+)
 from .server import DEFAULT_TOKEN, StackPublisher
 
 log = logging.getLogger("evt_sidecar.gui")
@@ -119,6 +128,117 @@ class _Led(QWidget):
         self.label.setText(text)
 
 
+class _RamBar(QWidget):
+    """Horizontal meter: fill = stack / installed RAM, ticks at 1/8 and 1/4."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumHeight(28)
+        self.setMaximumHeight(32)
+        self._frac = 0.0
+        self._level = "ok"
+
+    def set_fraction(self, frac: float, level: str) -> None:
+        self._frac = max(0.0, float(frac))
+        self._level = level
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802, ARG002
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        w = max(1, self.width())
+        h = max(1, self.height())
+        span = max(0.50, min(1.0, self._frac * 1.25 + 0.08))
+
+        def px(frac: float) -> int:
+            return int(round(w * min(1.0, max(0.0, frac) / span)))
+
+        painter.fillRect(0, 0, w, h, QColor("#111111"))
+        painter.fillRect(0, 0, px(YELLOW_FRAC), h, QColor("#16351f"))
+        painter.fillRect(
+            px(YELLOW_FRAC),
+            0,
+            max(0, px(RED_FRAC) - px(YELLOW_FRAC)),
+            h,
+            QColor("#4a3b08"),
+        )
+        painter.fillRect(px(RED_FRAC), 0, max(0, w - px(RED_FRAC)), h, QColor("#4a1212"))
+        fill = QColor(FILL_COLOR.get(self._level, "#2ecc71"))
+        painter.fillRect(0, 0, px(self._frac), h, fill)
+        painter.setPen(QPen(QColor("#ffffff"), 2))
+        painter.drawLine(px(YELLOW_FRAC), 0, px(YELLOW_FRAC), h)
+        painter.drawLine(px(RED_FRAC), 0, px(RED_FRAC), h)
+        font = QFont(self.font())
+        font.setBold(True)
+        font.setPointSize(max(8, font.pointSize() - 1))
+        painter.setFont(font)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(px(YELLOW_FRAC) + 5, h - 8, "1/8")
+        painter.drawText(px(RED_FRAC) + 5, h - 8, "1/4")
+
+
+class _RamBanner(QFrame):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setMinimumHeight(92)
+        col = QVBoxLayout(self)
+        col.setContentsMargins(12, 10, 12, 10)
+        col.setSpacing(6)
+        self.headline = QLabel("RAM")
+        head_font = QFont(self.headline.font())
+        head_font.setBold(True)
+        head_font.setPointSize(head_font.pointSize() + 4)
+        self.headline.setFont(head_font)
+        self.bar = _RamBar()
+        self.detail = QLabel("Choose Δt to see how much memory this send needs.")
+        self.detail.setWordWrap(True)
+        col.addWidget(self.headline)
+        col.addWidget(self.bar)
+        col.addWidget(self.detail)
+        self.set_idle()
+
+    def set_idle(self) -> None:
+        self._apply_colors("#2c2c2c", "#dddddd")
+        self.headline.setText("RAM")
+        self.bar.set_fraction(0.0, "ok")
+        self.detail.setText("Choose Δt to see how much memory this send needs.")
+
+    def set_budget(self, budget: StackBudget, ram) -> None:  # noqa: ANN001
+        bg, fg, tag = budget.banner_theme()
+        self._apply_colors(bg, fg)
+        self.headline.setText(
+            f"{tag}   ·   {budget.fraction_of_total:.0%} of {fmt_bytes(ram.total)} RAM"
+        )
+        self.bar.set_fraction(budget.fraction_of_total, budget.level)
+        notes = {
+            "ok": "Fits comfortably.",
+            "yellow": "Large — BLITZ will feel it, but this should still run.",
+            "red": "Huge — confirm before send. BLITZ holds another copy.",
+            "block": "Will not send: pictures would not fit in free RAM.",
+        }
+        nav = ""
+        if budget.nav_warn:
+            nav = (
+                f" {budget.n_frames} pictures — above {NAV_WARN_FRAMES} the BLITZ "
+                "timeline is very fine-grained. Allowed, but only if you know "
+                "you need it."
+            )
+        self.detail.setText(
+            f"{fmt_bytes(budget.wire_bytes)} on the wire  ·  "
+            f"{budget.n_frames} pictures  ·  "
+            f"~{fmt_bytes(budget.build_bytes)} to build (float32)  ·  "
+            f"{fmt_bytes(ram.available)} free.  {notes[budget.level]}{nav}"
+        )
+
+    def _apply_colors(self, bg: str, fg: str) -> None:
+        self.setStyleSheet(
+            f"QFrame {{ background:{bg}; border-radius:6px; }}"
+            f"QLabel {{ color:{fg}; background:transparent; }}"
+        )
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -142,6 +262,8 @@ class MainWindow(QMainWindow):
         self._pending_export = False
         self._blitz_clients = 0
         self._syncing_range = False
+        self._playhead_s = 0.0
+        self._stack_budget: StackBudget | None = None
 
         self._bridge = _NetBridge(self)
         self._bridge.served.connect(self._on_blitz_downloaded)
@@ -180,63 +302,86 @@ class MainWindow(QMainWindow):
         self.meta_label.setWordWrap(True)
         layout.addWidget(self.meta_label)
 
-        step1 = QGroupBox("1 — Overview of the whole recording (not sent to BLITZ)")
+        step1 = QGroupBox("1 — Overview (local only, not sent to BLITZ)")
         s1 = QVBoxLayout(step1)
         s1.addWidget(QLabel(
-            "After opening a file, a coarse picture stack is built so you can "
-            "click through time. Choose start and end here; nothing is streamed yet."
+            "Scrub the pictures with the mouse on the timeline under the image "
+            "(like BLITZ). Yellow band = start → end of the range you will send. "
+            "White line = the picture you are looking at."
         ))
-        self.rate_plot = pg.PlotWidget()
-        self.rate_plot.setMinimumHeight(100)
-        self.rate_plot.setLabel("bottom", "Time", units="ms")
-        self.rate_plot.setLabel("left", "Events")
-        self.rate_plot.showGrid(x=True, y=True, alpha=0.2)
-        self.rate_curve = self.rate_plot.plot(pen=pg.mkPen("#7ec8e3", width=1))
-        self.region = pg.LinearRegionItem([0.0, 1.0], brush=(230, 180, 40, 60))
-        self.rate_plot.addItem(self.region)
-        self.region.sigRegionChanged.connect(self._on_region_changed)
-        s1.addWidget(self.rate_plot)
-
-        range_row = QHBoxLayout()
-        self.start_frame = QSpinBox()
-        self.end_frame = QSpinBox()
-        self.start_frame.valueChanged.connect(self._on_frame_range_changed)
-        self.end_frame.valueChanged.connect(self._on_frame_range_changed)
-        range_row.addWidget(QLabel("Start picture"))
-        range_row.addWidget(self.start_frame)
-        range_row.addWidget(QLabel("End picture"))
-        range_row.addWidget(self.end_frame)
-        s1.addLayout(range_row)
-        self.range_time_label = QLabel("Load a recording first.")
-        s1.addWidget(self.range_time_label)
-
         self.preview = pg.ImageView()
         self.preview.ui.roiBtn.hide()
         self.preview.ui.menuBtn.hide()
-        self.preview.setMinimumHeight(220)
-        s1.addWidget(self.preview)
-        layout.addWidget(step1)
+        self.preview.ui.histogram.hide()
+        self.preview.ui.roiPlot.hide()
+        self.preview.setMinimumHeight(280)
+        s1.addWidget(self.preview, stretch=1)
+
+        self.playhead_label = QLabel("t = —")
+        s1.addWidget(self.playhead_label)
+
+        self.time_plot = pg.PlotWidget()
+        self.time_plot.setMinimumHeight(110)
+        self.time_plot.setMaximumHeight(140)
+        self.time_plot.setLabel("bottom", "Time", units="s")
+        self.time_plot.setLabel("left", "Events")
+        self.time_plot.showGrid(x=True, y=True, alpha=0.2)
+        self.time_plot.setMouseEnabled(x=False, y=False)
+        self.rate_curve = self.time_plot.plot(pen=pg.mkPen("#7ec8e3", width=1))
+        self.region = pg.LinearRegionItem([0.0, 1.0], brush=(230, 180, 40, 55))
+        self.region.setZValue(0)
+        self.time_plot.addItem(self.region)
+        self.playhead = pg.InfiniteLine(
+            pos=0.0, angle=90, movable=True, pen=pg.mkPen("#ffffff", width=2)
+        )
+        self.playhead.setZValue(10)
+        self.time_plot.addItem(self.playhead)
+        self.region.sigRegionChanged.connect(self._on_region_changed)
+        self.playhead.sigPositionChanged.connect(self._on_playhead_moved)
+        self.time_plot.scene().sigMouseClicked.connect(self._on_timeline_clicked)
+        self.time_plot.installEventFilter(self)
+        self.time_plot.viewport().installEventFilter(self)
+        self.preview.sigTimeChanged.connect(self._on_preview_index)
+        s1.addWidget(self.time_plot)
+        layout.addWidget(step1, stretch=1)
 
         step2 = QGroupBox("2 — Frame time for the selected range")
-        form = QFormLayout(step2)
+        s2 = QVBoxLayout(step2)
+        form = QFormLayout()
         self.dt_ms = QDoubleSpinBox()
-        self.dt_ms.setRange(0.001, 1_000_000.0)
+        self.dt_ms.setRange(SENSOR_DT_US / 1000.0, 1_000_000.0)
         self.dt_ms.setDecimals(3)
         self.dt_ms.setSingleStep(0.1)
         self.dt_ms.setValue(1.0)
         self.dt_ms.setSuffix(" ms")
+        self.dt_ms.setToolTip(
+            "How long each picture integrates. Sensor timestamps step by 1 µs "
+            "(0.001 ms). Picture count is limited only by RAM (yellow/red below)."
+        )
         self.dt_ms.valueChanged.connect(self._refresh_plan_label)
         form.addRow("Frame time (Δt)", self.dt_ms)
-        self.min_dt_label = QLabel("Min Δt: —")
+        self.min_dt_label = QLabel(
+            "Sensor timestamps at 1 µs (relative to the start of this file, "
+            "not wall-clock). Stack size is a soft RAM limit — see the bar."
+        )
+        self.min_dt_label.setWordWrap(True)
         form.addRow(self.min_dt_label)
         self.polarity = QComboBox()
         for mode in PolarityMode:
             self.polarity.addItem(mode.value, mode)
         self.polarity.setCurrentIndex(2)
         form.addRow("Polarity", self.polarity)
-        self.plan_label = QLabel("Select a range, then set Δt.")
-        self.plan_label.setWordWrap(True)
-        form.addRow(self.plan_label)
+        self.log_stretch = QCheckBox("Log stretch (log1p → 0…255)")
+        self.log_stretch.setChecked(False)
+        self.log_stretch.setToolTip(
+            "Off (default): send raw event counts, clipped at 255. "
+            "On: squeeze the range so a few hot pixels do not crush the rest. "
+            "Applies to the next overview and to the next send."
+        )
+        form.addRow(self.log_stretch)
+        s2.addLayout(form)
+        self.ram_banner = _RamBanner()
+        s2.addWidget(self.ram_banner)
         layout.addWidget(step2)
 
         step3 = QGroupBox("3 — Send to BLITZ (only when you click)")
@@ -253,6 +398,14 @@ class MainWindow(QMainWindow):
         self.push_btn.clicked.connect(self._repush)
         s3.addWidget(self.apply_btn)
         s3.addWidget(self.push_btn)
+        self.gzip_box = QCheckBox("Gzip on the wire")
+        self.gzip_box.setChecked(False)
+        self.gzip_box.setToolTip(
+            "Only useful over a weak network. Leave off on this computer — "
+            "zip then unzip is wasted CPU."
+        )
+        self.gzip_box.toggled.connect(self._on_gzip_toggled)
+        s3.addWidget(self.gzip_box)
         self.connect_hint = QLabel()
         self.connect_hint.setWordWrap(True)
         s3.addWidget(self.connect_hint)
@@ -280,6 +433,9 @@ class MainWindow(QMainWindow):
             f"token <b>{self.publisher.token}</b> → Connect. "
             "Then use the button above."
         )
+
+    def _on_gzip_toggled(self, checked: bool) -> None:
+        self.publisher.gzip_enabled = bool(checked)
 
     def _browse(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -318,25 +474,29 @@ class MainWindow(QMainWindow):
 
     def _on_loaded(self, store: EventStore) -> None:
         self._store = store
-        dur_ms = store.duration_us / 1000.0
+        dur_s = max(store.duration_us / 1_000_000.0, 0.001)
         self.meta_label.setText(
-            f"{store.width}×{store.height}  |  {len(store):,} events  |  {dur_ms:.1f} ms"
+            f"{store.width}×{store.height}  |  {len(store):,} events  |  "
+            f"{dur_s:.3f} s (from first event in this file)"
         )
         x_ms, counts = event_rate_ms(store)
-        self.rate_curve.setData(x_ms, counts)
-        xmax = max(dur_ms, 0.001)
+        self.rate_curve.setData(x_ms / 1000.0, counts)
         self.region.blockSignals(True)
-        self.region.setBounds((0.0, xmax))
-        self.region.setRegion((0.0, xmax))
+        self.playhead.blockSignals(True)
+        self.region.setBounds((0.0, dur_s))
+        self.region.setRegion((0.0, dur_s))
+        self.playhead.setBounds((0.0, dur_s))
+        self.playhead.setValue(0.0)
+        self.playhead.blockSignals(False)
         self.region.blockSignals(False)
-        self.rate_plot.setXRange(0.0, xmax, padding=0.02)
+        self.time_plot.setXRange(0.0, dur_s, padding=0.02)
         self.led.set_state("work", f"1/3 Building ~{OVERVIEW_PICTURES}-picture overview…")
         self._start_bin(self._overview_params(), "overview")
 
     def _overview_params(self) -> BinParams:
         assert self._store is not None
         window_us = max(1, self._store.duration_us)
-        dt_us, n, _c, _u = plan_pictures(window_us, n_frames=OVERVIEW_PICTURES)
+        dt_us, n, _u = plan_pictures(window_us, n_frames=OVERVIEW_PICTURES)
         self._overview_dt_us = dt_us
         return BinParams(
             dt_us=dt_us,
@@ -353,86 +513,132 @@ class MainWindow(QMainWindow):
 
     def _selected_window_us(self) -> tuple[int, int]:
         assert self._store is not None
-        t0_rel_ms, t1_rel_ms = self.region.getRegion()
-        if t1_rel_ms < t0_rel_ms:
-            t0_rel_ms, t1_rel_ms = t1_rel_ms, t0_rel_ms
+        t0_s, t1_s = self.region.getRegion()
+        if t1_s < t0_s:
+            t0_s, t1_s = t1_s, t0_s
         t_base = int(self._store.t_min)
-        t0 = t_base + int(round(t0_rel_ms * 1000.0))
-        t1 = t_base + int(round(t1_rel_ms * 1000.0))
+        t0 = t_base + int(round(t0_s * 1_000_000.0))
+        t1 = t_base + int(round(t1_s * 1_000_000.0))
         return t0, max(t0 + 1, t1)
+
+    def _duration_s(self) -> float:
+        if self._store is None:
+            return 0.001
+        return max(self._store.duration_us / 1_000_000.0, 0.001)
+
+    def _frame_at_s(self, t_s: float) -> int:
+        if self._overview is None:
+            return 0
+        n = self._overview.shape[0]
+        idx = int(round(t_s * 1_000_000.0 / max(1, self._overview_dt_us)))
+        return max(0, min(n - 1, idx))
+
+    def _set_playhead_s(self, t_s: float) -> None:
+        dur = self._duration_s()
+        t_s = max(0.0, min(dur, t_s))
+        self._playhead_s = t_s
+        self._syncing_range = True
+        self.playhead.setValue(t_s)
+        if self._overview is not None:
+            idx = self._frame_at_s(t_s)
+            self.preview.setCurrentIndex(idx)
+        self._syncing_range = False
+        if self._overview is not None:
+            n = self._overview.shape[0]
+            self.playhead_label.setText(
+                f"t = {t_s:.4f} s   ·   overview picture {idx + 1} / {n}   "
+                f"({self._overview_dt_us / 1000.0:.2f} ms per overview picture)"
+            )
+        else:
+            self.playhead_label.setText(f"t = {t_s:.4f} s")
+
+    def _on_playhead_moved(self) -> None:
+        if self._syncing_range:
+            return
+        self._set_playhead_s(float(self.playhead.value()))
+
+    def _on_preview_index(self, ind, _time) -> None:  # noqa: ANN001
+        if self._syncing_range or self._overview is None:
+            return
+        t_s = int(ind) * self._overview_dt_us / 1_000_000.0
+        self._set_playhead_s(t_s)
+
+    def _on_timeline_clicked(self, event) -> None:  # noqa: ANN001
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        vb = self.time_plot.plotItem.vb
+        if not vb.sceneBoundingRect().contains(event.scenePos()):
+            return
+        x = vb.mapSceneToView(event.scenePos()).x()
+        self._set_playhead_s(x)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        watched = {self.time_plot, self.time_plot.viewport()}
+        if obj in watched and event.type() == QEvent.Type.Wheel:
+            wheel = event
+            if isinstance(wheel, QWheelEvent) and self._overview is not None:
+                step = 1 if wheel.angleDelta().y() < 0 else -1
+                idx = self._frame_at_s(self._playhead_s) + step
+                t_s = idx * self._overview_dt_us / 1_000_000.0
+                self._set_playhead_s(t_s)
+                return True
+        return super().eventFilter(obj, event)
 
     def _refresh_plan_label(self) -> None:
         if self._store is None:
             return
         t0, t1 = self._selected_window_us()
         window_us = t1 - t0
-        dt_us = max(1, int(round(self.dt_ms.value() * 1000.0)))
-        dt_us, n, capped, used_us = plan_pictures(window_us, dt_us=dt_us)
-        lo = min_dt_us(window_us)
-        self.dt_ms.setMinimum(max(0.001, lo / 1000.0))
+        dt_us = max(SENSOR_DT_US, int(round(self.dt_ms.value() * 1000.0)))
+        dt_us, n, _used_us = plan_pictures(window_us, dt_us=dt_us)
+        span_s = window_us / 1_000_000.0
+        t0_s = (t0 - self._store.t_min) / 1_000_000.0
+        t1_s = (t1 - self._store.t_min) / 1_000_000.0
+        ram = read_ram()
+        budget = assess_stack(n, self._store.height, self._store.width, ram)
+        self._stack_budget = budget
+        y_b = YELLOW_FRAC * ram.total
+        r_b = RED_FRAC * ram.total
         self.min_dt_label.setText(
-            f"Min Δt for this range: {lo / 1000.0:.3f} ms  "
-            f"({HARD_FRAME_CAP} pictures max; sensor tick {SENSOR_DT_US} µs)"
+            f"Time in this file starts at 0 (first event), not the clock. "
+            f"Timestamps step by {SENSOR_DT_US} µs. "
+            f"Selected {t0_s:.4f}–{t1_s:.4f} s ({span_s:.3f} s). "
+            f"Δt = {dt_us / 1000.0:.3f} ms. "
+            f"Yellow ≥ {fmt_bytes(int(y_b))} (1/8 RAM), "
+            f"red ≥ {fmt_bytes(int(r_b))} (1/4 RAM). "
+            f"Above {NAV_WARN_FRAMES} pictures BLITZ becomes uncomfortable to scrub."
         )
-        span_ms = window_us / 1000.0
-        mb = n * self._store.height * self._store.width / (1024 * 1024)
-        text = (
-            f"{span_ms:.1f} ms selected  →  {n} pictures × {dt_us / 1000.0:.3f} ms "
-            f"(~{mb:.0f} MB to BLITZ)"
-        )
-        if capped:
-            text += (
-                f"  —  Δt is below the minimum; only the first {used_us / 1000.0:.1f} ms "
-                f"would be sent. Raise Δt to at least {lo / 1000.0:.3f} ms."
+        self.ram_banner.set_budget(budget, ram)
+        self._style_send_button(budget.level)
+
+    def _style_send_button(self, level: str) -> None:
+        ready = self._overview is not None
+        if level == "block":
+            self.apply_btn.setEnabled(False)
+            self.apply_btn.setText("Too big for free RAM — raise Δt or shrink range")
+            self.apply_btn.setStyleSheet(
+                "QPushButton { background:#6b0000; color:#ffffff; font-weight:bold; "
+                "padding:8px; }"
             )
-            pal = QPalette(self.plan_label.palette())
-            pal.setColor(QPalette.ColorRole.WindowText, QColor("#e6a817"))
-            self.plan_label.setPalette(pal)
+            return
+        self.apply_btn.setEnabled(ready)
+        self.apply_btn.setText("Build pictures and send to BLITZ")
+        if level == "yellow":
+            self.apply_btn.setStyleSheet(
+                "QPushButton { background:#f1c40f; color:#1a1400; font-weight:bold; "
+                "padding:8px; }"
+            )
+        elif level == "red":
+            self.apply_btn.setStyleSheet(
+                "QPushButton { background:#e74c3c; color:#ffffff; font-weight:bold; "
+                "padding:8px; }"
+            )
         else:
-            self.plan_label.setPalette(QLabel().palette())
-        self.plan_label.setText(text)
-        t0_rel = (t0 - self._store.t_min) / 1000.0
-        t1_rel = (t1 - self._store.t_min) / 1000.0
-        self.range_time_label.setText(
-            f"Selected {t0_rel:.2f}–{t1_rel:.2f} ms  "
-            f"(overview pictures {self.start_frame.value()}–{self.end_frame.value()})"
-        )
+            self.apply_btn.setStyleSheet("")
 
     def _on_region_changed(self) -> None:
-        if self._syncing_range or self._store is None or self._overview is None:
-            self._refresh_plan_label()
+        if self._syncing_range:
             return
-        t0, t1 = self._selected_window_us()
-        dt = self._overview_dt_us
-        i0 = int((t0 - self._store.t_min) // dt)
-        i1 = int((t1 - self._store.t_min) // dt)
-        n = self._overview.shape[0]
-        i0 = max(0, min(n - 1, i0))
-        i1 = max(i0, min(n - 1, i1))
-        self._syncing_range = True
-        self.start_frame.setValue(i0)
-        self.end_frame.setValue(i1)
-        self._syncing_range = False
-        self._refresh_plan_label()
-
-    def _on_frame_range_changed(self) -> None:
-        if self._syncing_range or self._store is None:
-            return
-        if self.start_frame.value() > self.end_frame.value():
-            self._syncing_range = True
-            if self.sender() is self.start_frame:
-                self.end_frame.setValue(self.start_frame.value())
-            else:
-                self.start_frame.setValue(self.end_frame.value())
-            self._syncing_range = False
-        i0, i1 = self.start_frame.value(), self.end_frame.value()
-        t0_ms = i0 * self._overview_dt_us / 1000.0
-        t1_ms = (i1 + 1) * self._overview_dt_us / 1000.0
-        self._syncing_range = True
-        self.region.setRegion((t0_ms, t1_ms))
-        self._syncing_range = False
-        if self._overview is not None:
-            self.preview.setCurrentIndex(i0)
         self._refresh_plan_label()
 
     def _suggest_dt_from_overview(self) -> None:
@@ -476,25 +682,20 @@ class MainWindow(QMainWindow):
 
     def _on_binned(self, stack: object, elapsed: float, kind: str) -> None:
         arr = np.asarray(stack)
-        net = stack_for_network(arr)
+        net = stack_for_network(arr, log_stretch=self.log_stretch.isChecked())
         if kind == "overview":
             self._overview = net
             n = net.shape[0]
-            self.start_frame.blockSignals(True)
-            self.end_frame.blockSignals(True)
-            self.start_frame.setRange(0, max(0, n - 1))
-            self.end_frame.setRange(0, max(0, n - 1))
-            self.start_frame.setValue(0)
-            self.end_frame.setValue(max(0, n - 1))
-            self.start_frame.blockSignals(False)
-            self.end_frame.blockSignals(False)
             self.preview.setImage(net, autoLevels=True, axes={"t": 0, "y": 1, "x": 2})
+            self.preview.ui.roiPlot.hide()
+            self.preview.ui.histogram.hide()
             self._suggest_dt_from_overview()
             self.apply_btn.setEnabled(True)
+            self._set_playhead_s(0.0)
             self.led.set_state(
                 "ok",
-                f"1/3 Overview ready ({n} pictures, {self._overview_dt_us / 1000.0:.2f} ms each). "
-                "Pick start/end, set Δt, then send.",
+                f"Overview ready ({n} pictures). Scrub the timeline, set the yellow "
+                "start/end, choose Δt, then send to BLITZ.",
             )
             self._refresh_plan_label()
             return
@@ -509,8 +710,8 @@ class MainWindow(QMainWindow):
     def _export_params(self) -> BinParams:
         assert self._store is not None
         t0, t1 = self._selected_window_us()
-        dt_us = max(1, int(round(self.dt_ms.value() * 1000.0)))
-        dt_us, n, _c, _u = plan_pictures(t1 - t0, dt_us=dt_us)
+        dt_us = max(SENSOR_DT_US, int(round(self.dt_ms.value() * 1000.0)))
+        dt_us, n, _u = plan_pictures(t1 - t0, dt_us=dt_us)
         return BinParams(
             dt_us=dt_us,
             polarity=self.polarity.currentData(),
@@ -523,6 +724,42 @@ class MainWindow(QMainWindow):
     def _export_to_blitz(self) -> None:
         if self._store is None:
             return
+        self._refresh_plan_label()
+        budget = self._stack_budget
+        if budget is not None and budget.level == "block":
+            QMessageBox.critical(
+                self,
+                "Not enough RAM",
+                f"{budget.n_frames} pictures = {fmt_bytes(budget.wire_bytes)} "
+                f"on the wire, but only {fmt_bytes(read_ram().available)} is free. "
+                "Raise Δt or shrink the yellow band.",
+            )
+            return
+        if budget is not None and (
+            budget.level == "red" or budget.nav_warn
+        ):
+            parts: list[str] = []
+            if budget.nav_warn:
+                parts.append(
+                    f"{budget.n_frames} pictures — more than {NAV_WARN_FRAMES} is "
+                    "not comfortable in BLITZ (timeline too fine-grained). "
+                    "Continue only if you know you need this."
+                )
+            if budget.level == "red":
+                parts.append(
+                    f"{fmt_bytes(budget.wire_bytes)} is "
+                    f"{budget.fraction_of_total:.0%} of this PC's RAM on the wire. "
+                    "BLITZ will hold another copy."
+                )
+            yes = QMessageBox.warning(
+                self,
+                "Check before send",
+                "\n\n".join(parts),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if yes != QMessageBox.StandardButton.Yes:
+                return
         self.led.set_state("work", "2/3 Building pictures for BLITZ…")
         self._start_bin(self._export_params(), "export")
 

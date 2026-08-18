@@ -7,14 +7,15 @@ Contract: WOLKE/BLITZ_Receiver_Contract.md
 
 from __future__ import annotations
 
-import io
 import logging
 import threading
 from typing import Callable
 
 import numpy as np
-from flask import Flask, abort, request, send_file
+from flask import Flask, abort, request
 from flask_socketio import SocketIO
+
+from .npy_http import npy_response
 
 log = logging.getLogger("evt_sidecar.server")
 
@@ -44,6 +45,7 @@ class StackPublisher:
         self.on_served: Callable[[int], None] | None = None
         self.on_client_count: Callable[[int], None] | None = None
         self._clients = 0
+        self.gzip_enabled = False
 
     @property
     def base_url(self) -> str:
@@ -103,18 +105,28 @@ class StackPublisher:
                 stack = publisher._stack
             if stack is None:
                 return abort(404)
-            # Serve same payload for stack.npy or any requested name in v1
-            buf = io.BytesIO()
-            np.save(buf, stack)
-            buf.seek(0)
-            nbytes = int(stack.nbytes)
-            if publisher.on_served is not None:
-                publisher.on_served(nbytes)
-            return send_file(
-                buf,
-                mimetype="application/octet-stream",
-                download_name=file_name if file_name.endswith(".npy") else STACK_NAME,
+            download_name = (
+                file_name if file_name.endswith(".npy") else STACK_NAME
             )
+            want_gzip = publisher.gzip_enabled or (
+                request.args.get("gzip", "").lower() in {"1", "true", "yes"}
+            )
+            resp, raw_n, wire_n, used_gzip = npy_response(
+                stack,
+                download_name=download_name,
+                accept_encoding=request.headers.get("Accept-Encoding"),
+                compress=want_gzip,
+            )
+            log.info(
+                "serve %s raw=%.1f MB wire=%.1f MB encoding=%s",
+                download_name,
+                raw_n / (1024 * 1024),
+                wire_n / (1024 * 1024),
+                "gzip" if used_gzip else "identity",
+            )
+            if publisher.on_served is not None:
+                publisher.on_served(wire_n)
+            return resp
 
         @sio.on("connect")
         def on_connect():

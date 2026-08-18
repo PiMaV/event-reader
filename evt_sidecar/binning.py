@@ -28,7 +28,7 @@ class BinParams:
     accum: AccumMode = AccumMode.COUNT
     t0_us: int | None = None  # absolute; None = store.t_min
     t1_us: int | None = None  # absolute; None = store.t_max
-    max_frames: int | None = 2000  # safety cap for RAM / Network transfer
+    max_frames: int | None = None  # None = no hard picture cap
 
     def clamp_dt(self) -> int:
         return max(1, int(self.dt_us))
@@ -104,15 +104,8 @@ def bin_events(store: EventStore, params: BinParams) -> np.ndarray:
     return stack
 
 
-HARD_FRAME_CAP = 2000
 SENSOR_DT_US = 1  # EVT3 timestamp tick
 OVERVIEW_PICTURES = 150
-
-
-def min_dt_us(window_us: int, cap: int = HARD_FRAME_CAP) -> int:
-    """Finest frame time that still fits `cap` pictures (not below 1 µs)."""
-    window_us = max(1, int(window_us))
-    return max(SENSOR_DT_US, int((window_us + cap - 1) // cap))
 
 
 def plan_pictures(
@@ -120,14 +113,12 @@ def plan_pictures(
     *,
     dt_us: int | None = None,
     n_frames: int | None = None,
-    cap: int = HARD_FRAME_CAP,
-) -> tuple[int, int, bool, int]:
+) -> tuple[int, int, int]:
     """
-    Map a time window to (dt_us, n_frames, capped, used_window_us).
+    Map a time window to (dt_us, n_frames, used_window_us).
 
     Drive with either frame time (dt_us) or picture count (n_frames).
-    If the result exceeds `cap`, keep dt and take the first `cap` frames
-    (used_window_us may be shorter than window_us).
+    No hard picture cap — RAM warnings live in ``ram.assess_stack``.
     """
     window_us = max(1, int(window_us))
     if dt_us is not None:
@@ -137,11 +128,8 @@ def plan_pictures(
         n = max(1, int(n_frames or 1))
         dt = max(1, int(round(window_us / n)))
         n = max(1, int((window_us + dt - 1) // dt))
-    capped = n > cap
-    if capped:
-        n = cap
     used = min(window_us, n * dt)
-    return dt, n, capped, used
+    return dt, n, used
 
 
 def event_rate_ms(store: EventStore, n_bins: int = 400) -> tuple[np.ndarray, np.ndarray]:
@@ -158,12 +146,13 @@ def event_rate_ms(store: EventStore, n_bins: int = 400) -> tuple[np.ndarray, np.
     return x_ms, counts.astype(np.float64)
 
 
-def stack_for_network(stack: np.ndarray) -> np.ndarray:
+def stack_for_network(stack: np.ndarray, *, log_stretch: bool = False) -> np.ndarray:
     """
     Compact float stack → uint8 for WOLKE/BLITZ HTTP transfer.
 
-    Sparse event counts are heavy-tailed (max ≫ typical). Linear min–max mapping
-    rounds almost all pixels to 0 — use log1p (+ high percentile clip) instead.
+    Default ``log_stretch=False``: raw event counts, clipped to 0…255 (signed:
+    mid-grey 128). ``log_stretch=True``: log1p into the full 0…255 range so a
+    few hot pixels do not crush typical counts.
     """
     arr = np.asarray(stack, dtype=np.float32)
     if arr.size == 0:
@@ -171,6 +160,11 @@ def stack_for_network(stack: np.ndarray) -> np.ndarray:
 
     amin = float(arr.min())
     amax = float(arr.max())
+
+    if not log_stretch:
+        if amin < 0.0 < amax:
+            return np.clip(np.round(arr) + 128.0, 0, 255).astype(np.uint8)
+        return np.clip(np.round(np.maximum(arr, 0.0)), 0, 255).astype(np.uint8)
     if amin < 0.0 < amax:
         # Signed: log-magnitude around mid-grey
         mag = np.log1p(np.abs(arr))
