@@ -138,7 +138,11 @@ jobs:
             dist/EventReader
           fail_on_unmatched_files: true
           body: |
-            Event-camera EVT3 `.raw` → BLITZ.
+            Event-camera EVT3 `.raw` → BLITZ (WOLKE Network contract).
 
             1. Run `EventReader` / `EventReader.exe` (optional path to a `.raw` file).
-            2. In BLITZ → Network: `http://127.0.0.1:5055`, token `evt`.
+            2. Open a recording, scrub the timeline, set Δt, then **Build pictures and send to BLITZ**.
+            3. In BLITZ → Network: `http://127.0.0.1:5055`, token `evt` → Connect.
+
+            Default payload is float32 event counts. Optional 8-bit / Normalize / Grayscale
+            match the BLITZ File tab. Gzip is off unless you check it in the reader.
