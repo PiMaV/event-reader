@@ -138,8 +138,7 @@ jobs:
             dist/EventReader
           fail_on_unmatched_files: true
           body: |
-            Working-title **Event reader** (EVT3 `.raw` → BLITZ via WOLKE contract).
-            Not FUNKE. Not part of the BLITZ Flatpak.
+            Event-camera EVT3 `.raw` → BLITZ.
 
             1. Run `EventReader` / `EventReader.exe` (optional path to a `.raw` file).
             2. In BLITZ → Network: `http://127.0.0.1:5055`, token `evt`.

@@ -1,7 +1,7 @@
 [project]
 name = "event-reader"
 version = "0.1.0"
-description = "Working-title EVT3 archive reader → BLITZ via WOLKE contract (not FUNKE)"
+description = "EVT3 event-camera .raw reader for BLITZ"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
