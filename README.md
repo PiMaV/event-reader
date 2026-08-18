@@ -52,16 +52,15 @@ Nothing is sent until you click **Build pictures and send to BLITZ**.
    no clip at 255. RAM yellow ≥ 1/8 of installed RAM, red ≥ 1/4; more than
    1000 pictures is allowed but uncomfortable in BLITZ.
 5. In BLITZ → **Network**: address `http://127.0.0.1:5055`, token `evt` →
-   Connect, then send. BLITZ File-tab options apply on Connect too, including
-   **Floor |v|**. **Gzip** is a checkbox, default off (localhost). **Log stretch**
-   is only available with 8-bit.
+   Connect, then send. BLITZ File-tab options (8-bit / Normalize / Grayscale)
+   apply on Connect too. **Gzip** is a checkbox, default off (localhost).
+   **Log stretch** is only available with 8-bit.
 
 | Option | Event reader | BLITZ File tab on Connect |
 |--------|--------------|---------------------------|
 | 8-bit | optional, default off | applied if checked |
 | Normalize | optional, default off | applied if checked |
 | Grayscale | on (counts are already one channel) | applied if checked |
-| Floor \|v\| | not in the sidecar | applied if checked |
 | Gzip | opt-in, default off | — |
 
 Do not turn **8-bit** on in both places unless you want two quantizations.
