@@ -41,6 +41,9 @@ class StackPublisher:
         self._sio = SocketIO(self._app, cors_allowed_origins="*", async_mode="threading")
         self._register()
         self.on_viewer_index: Callable[[int], None] | None = None
+        self.on_served: Callable[[int], None] | None = None
+        self.on_client_count: Callable[[int], None] | None = None
+        self._clients = 0
 
     @property
     def base_url(self) -> str:
@@ -104,6 +107,9 @@ class StackPublisher:
             buf = io.BytesIO()
             np.save(buf, stack)
             buf.seek(0)
+            nbytes = int(stack.nbytes)
+            if publisher.on_served is not None:
+                publisher.on_served(nbytes)
             return send_file(
                 buf,
                 mimetype="application/octet-stream",
@@ -112,9 +118,11 @@ class StackPublisher:
 
         @sio.on("connect")
         def on_connect():
+            publisher._clients += 1
             log.info("BLITZ client connected")
             sio.emit("Connected successfully")
-            # Auto-push current stack if already binned
+            if publisher.on_client_count is not None:
+                publisher.on_client_count(publisher._clients)
             with publisher._lock:
                 ready = publisher._stack is not None
             if ready:
@@ -122,7 +130,10 @@ class StackPublisher:
 
         @sio.on("disconnect")
         def on_disconnect():
+            publisher._clients = max(0, publisher._clients - 1)
             log.info("BLITZ client disconnected")
+            if publisher.on_client_count is not None:
+                publisher.on_client_count(publisher._clients)
 
         @sio.on("viewer_index")
         def on_viewer_index(data):

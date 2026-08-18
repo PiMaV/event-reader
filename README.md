@@ -3,8 +3,8 @@
 Open **event-camera recordings** (Prophesee/IDS **EVT3** `.raw`) and view them
 in [BLITZ](https://github.com/PiMaV/BLITZ) as a normal image stack.
 
-No Metavision / MDK install. You choose the time bin (Δt), polarity, and window;
-the reader builds frames and sends them to BLITZ.
+You choose the **time range** (yellow band) and either the **frame time** or
+the **number of pictures**. The reader builds a stack and sends it to BLITZ.
 
 ## Run
 
@@ -24,17 +24,21 @@ Optional: `--host`, `--port`, `--token` (defaults `127.0.0.1`, `5055`, `evt`).
 
 1. Start the event reader and load a `.raw` file (wait until it shows event count).
 2. BLITZ → **Network**: address `http://127.0.0.1:5055`, token `evt` → Connect.
-3. Change Δt / polarity / window in the reader; BLITZ updates the stack.
+3. Drag the yellow time band and set frame time (or picture count). A green
+   status means BLITZ downloaded the stack.
 
 ## Controls
 
 | Control | Meaning |
 |---------|---------|
-| Δt | Time per frame |
+| Yellow band | Which part of the recording becomes pictures |
+| Frame time | How long each picture integrates (e.g. 1 ms) |
+| Pictures | Alternative: set how many pictures, frame time follows |
 | Polarity | ON, OFF, both, or signed (ON−OFF) |
-| Window | Start/end within the recording |
-| Max frames | Caps how many frames are sent (keeps RAM/network bounded) |
-| Live apply | Recompute while you move the controls |
+| Preview | Same stack that will be sent; scrub with the mouse |
+
+A coloured status (decoding / making pictures / sending / **BLITZ received**)
+replaces guessing from the log line.
 
 Headless export without BLITZ:
 

@@ -15,6 +15,7 @@ dependencies = [
     "flask-socketio>=5.3",
     "eventlet>=0.35",
     "PyQt6>=6.6",
+    "pyqtgraph>=0.13.7,<0.14",
 ]
 
 [project.scripts]

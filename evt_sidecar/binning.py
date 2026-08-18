@@ -104,6 +104,52 @@ def bin_events(store: EventStore, params: BinParams) -> np.ndarray:
     return stack
 
 
+HARD_FRAME_CAP = 2000
+
+
+def plan_pictures(
+    window_us: int,
+    *,
+    dt_us: int | None = None,
+    n_frames: int | None = None,
+    cap: int = HARD_FRAME_CAP,
+) -> tuple[int, int, bool, int]:
+    """
+    Map a time window to (dt_us, n_frames, capped, used_window_us).
+
+    Drive with either frame time (dt_us) or picture count (n_frames).
+    If the result exceeds `cap`, keep dt and take the first `cap` frames
+    (used_window_us may be shorter than window_us).
+    """
+    window_us = max(1, int(window_us))
+    if dt_us is not None:
+        dt = max(1, int(dt_us))
+        n = max(1, int((window_us + dt - 1) // dt))
+    else:
+        n = max(1, int(n_frames or 1))
+        dt = max(1, int(round(window_us / n)))
+        n = max(1, int((window_us + dt - 1) // dt))
+    capped = n > cap
+    if capped:
+        n = cap
+    used = min(window_us, n * dt)
+    return dt, n, capped, used
+
+
+def event_rate_ms(store: EventStore, n_bins: int = 400) -> tuple[np.ndarray, np.ndarray]:
+    """Relative time (ms) vs event counts for a region slider plot."""
+    if len(store) == 0:
+        return np.array([0.0], dtype=np.float64), np.array([0.0], dtype=np.float64)
+    t0 = int(store.t_min)
+    t1 = int(store.t_max)
+    if t1 <= t0:
+        t1 = t0 + 1
+    counts, edges = np.histogram(store.t, bins=n_bins, range=(t0, t1))
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    x_ms = (centers - t0) / 1000.0
+    return x_ms, counts.astype(np.float64)
+
+
 def stack_for_network(stack: np.ndarray) -> np.ndarray:
     """
     Compact float stack → uint8 for WOLKE/BLITZ HTTP transfer.

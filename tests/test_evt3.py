@@ -114,6 +114,44 @@ def test_stack_for_network_uint8() -> None:
     assert int(s[0, 0, 1]) == 128
 
 
+def test_plan_pictures() -> None:
+    from evt_sidecar.binning import HARD_FRAME_CAP, plan_pictures
+
+    dt, n, capped, used = plan_pictures(1_500_000, dt_us=1000)
+    assert dt == 1000
+    assert n == 1500
+    assert not capped
+    assert used == 1_500_000
+
+    dt, n, capped, used = plan_pictures(1_500_000, n_frames=150)
+    assert n == 150
+    assert dt == 10_000
+    assert not capped
+
+    dt, n, capped, _used = plan_pictures(10_000_000, dt_us=1000)
+    assert capped
+    assert n == HARD_FRAME_CAP
+
+
+def test_event_rate_ms() -> None:
+    from evt_sidecar.binning import event_rate_ms
+    from evt_sidecar.raw_header import RawHeader
+
+    store = EventStore(
+        t=np.array([0, 100, 200, 5000], dtype=np.uint64),
+        x=np.zeros(4, dtype=np.uint16),
+        y=np.zeros(4, dtype=np.uint16),
+        p=np.ones(4, dtype=np.uint8),
+        width=8,
+        height=8,
+        header=RawHeader(8, 8, "EVT3", "3.0", {}, 0),
+    )
+    x_ms, counts = event_rate_ms(store, n_bins=10)
+    assert x_ms.shape == counts.shape
+    assert counts.sum() == 4
+    assert x_ms[-1] > 0
+
+
 def test_write_synthetic_raw_roundtrip(tmp_path: Path) -> None:
     header = (
         b"% evt 3.0\n"
