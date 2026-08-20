@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--host", default="127.0.0.1", help="Listen address")
     parser.add_argument("--port", type=int, default=5055, help="Listen port")
-    parser.add_argument("--token", default="evt", help="BLITZ Network token")
+    parser.add_argument("--token", default="evt", help="BLITZ Stream token")
     parser.add_argument(
         "-v",
         "--verbose",

@@ -8,9 +8,10 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QEvent, QObject, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QWheelEvent
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QCheckBox,
     QDoubleSpinBox,
@@ -24,6 +25,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QStatusBar,
@@ -104,29 +106,106 @@ class _NetBridge(QObject):
     clients = pyqtSignal(int)
 
 
-class _Led(QWidget):
+_STATUS_THEME = {
+    # kind: (banner bg, text, dot, short title)
+    "idle": ("#2c2c2c", "#dddddd", "#888888", "Idle"),
+    "work": ("#5a3e08", "#ffe9a8", "#e6a817", "Working"),
+    "wait": ("#0d3a6e", "#cfe4ff", "#3d8bfd", "Waiting"),
+    "ok": ("#0d4a2a", "#c8f5d8", "#2ecc71", "Ready"),
+    "err": ("#5a1212", "#ffd0d0", "#e74c3c", "Error"),
+}
+
+
+class _Led(QFrame):
+    """Full-width status banner (load / bin / BLITZ). Replaces the tiny traffic light."""
+
     def __init__(self) -> None:
         super().__init__()
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setMinimumHeight(64)
+        self.kind = "idle"
+        self._cursor_overridden = False
+        self._pulse_on = True
+
+        col = QVBoxLayout(self)
+        col.setContentsMargins(12, 8, 12, 8)
+        col.setSpacing(4)
+
+        row = QHBoxLayout()
+        row.setSpacing(12)
         self.dot = QFrame()
-        self.dot.setFixedSize(14, 14)
+        self.dot.setFixedSize(22, 22)
         self.dot.setFrameShape(QFrame.Shape.NoFrame)
-        self.label = QLabel("Idle")
-        row.addWidget(self.dot)
-        row.addWidget(self.label, stretch=1)
-        self.set_state("idle", "Idle")
+        titles = QVBoxLayout()
+        titles.setContentsMargins(0, 0, 0, 0)
+        titles.setSpacing(0)
+        self.headline = QLabel("Idle")
+        head_font = QFont(self.headline.font())
+        head_font.setBold(True)
+        head_font.setPointSize(head_font.pointSize() + 2)
+        self.headline.setFont(head_font)
+        self.label = QLabel(
+            "Open a RAW file. This bar shows decoding, send, and BLITZ Stream status."
+        )
+        self.label.setWordWrap(True)
+        titles.addWidget(self.headline)
+        titles.addWidget(self.label)
+        row.addWidget(self.dot, alignment=Qt.AlignmentFlag.AlignTop)
+        row.addLayout(titles, stretch=1)
+        col.addLayout(row)
+
+        self.busy = QProgressBar()
+        self.busy.setRange(0, 0)
+        self.busy.setTextVisible(False)
+        self.busy.setFixedHeight(8)
+        self.busy.setStyleSheet(
+            "QProgressBar { background:#111111; border:none; border-radius:4px; }"
+            "QProgressBar::chunk { background:#ffe9a8; }"
+        )
+        self.busy.hide()
+        col.addWidget(self.busy)
+
+        self._pulse = QTimer(self)
+        self._pulse.setInterval(450)
+        self._pulse.timeout.connect(self._toggle_pulse)
+        self.set_state("idle", self.label.text())
+
+    def _toggle_pulse(self) -> None:
+        self._pulse_on = not self._pulse_on
+        self._paint_dot()
+
+    def _paint_dot(self) -> None:
+        _bg, _fg, dot, _title = _STATUS_THEME.get(self.kind, _STATUS_THEME["idle"])
+        color = dot if self._pulse_on or self.kind not in ("work", "wait") else "#111111"
+        self.dot.setStyleSheet(f"background:{color}; border-radius:11px;")
+
+    def _set_busy_cursor(self, on: bool) -> None:
+        if on and not self._cursor_overridden:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self._cursor_overridden = True
+        elif not on and self._cursor_overridden:
+            QApplication.restoreOverrideCursor()
+            self._cursor_overridden = False
 
     def set_state(self, kind: str, text: str) -> None:
-        colors = {
-            "idle": "#888888",
-            "work": "#e6a817",
-            "wait": "#3d8bfd",
-            "ok": "#2ecc71",
-            "err": "#e74c3c",
-        }
-        self.dot.setStyleSheet(f"background:{colors.get(kind, '#888')}; border-radius:7px;")
+        self.kind = kind if kind in _STATUS_THEME else "idle"
+        bg, fg, _dot, title = _STATUS_THEME[self.kind]
+        self.headline.setText(title)
         self.label.setText(text)
+        self.setStyleSheet(
+            f"QFrame {{ background:{bg}; border-radius:6px; }}"
+            f"QLabel {{ color:{fg}; background:transparent; }}"
+        )
+        self._pulse_on = True
+        self._paint_dot()
+        busy = self.kind in ("work", "wait")
+        self.busy.setVisible(busy)
+        if busy:
+            self._pulse.start()
+        else:
+            self._pulse.stop()
+        self._set_busy_cursor(self.kind == "work")
 
 
 class _RamBar(QWidget):
@@ -299,6 +378,10 @@ class MainWindow(QMainWindow):
 
             QTimer.singleShot(0, lambda: self._load_path(Path(initial_raw)))
 
+    def _set_status(self, kind: str, text: str) -> None:
+        self.led.set_state(kind, text)
+        self.statusBar().showMessage(text)
+
     def _build_ui(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
@@ -439,7 +522,7 @@ class MainWindow(QMainWindow):
         s3 = QVBoxLayout(step3)
         s3.addWidget(QLabel(
             "BLITZ does not update by itself while you scrub. Connect BLITZ "
-            "Network first, then send. Green status = BLITZ downloaded the stack."
+            "Stream first, then send. Green status = BLITZ downloaded the stack."
         ))
         self.apply_btn = QPushButton("Build pictures and send to BLITZ")
         self.apply_btn.setEnabled(False)
@@ -480,7 +563,7 @@ class MainWindow(QMainWindow):
 
     def _update_connect_hint(self) -> None:
         self.connect_hint.setText(
-            f"In BLITZ → Network: address <b>{self.publisher.base_url}</b>, "
+            f"In BLITZ → <b>Stream</b> tab: address <b>{self.publisher.base_url}</b>, "
             f"token <b>{self.publisher.token}</b> → Connect. "
             "Then use the button above."
         )
@@ -507,7 +590,7 @@ class MainWindow(QMainWindow):
             return
         self.path_edit.setText(str(path))
         self.meta_label.setText("Decoding…")
-        self.led.set_state("work", "1/3 Decoding recording…")
+        self._set_status("work", "1/3 Decoding recording…")
         self.apply_btn.setEnabled(False)
         thread = QThread(self)
         worker = _LoadWorker(path)
@@ -549,7 +632,7 @@ class MainWindow(QMainWindow):
         self.region.blockSignals(False)
         self.time_plot.setXRange(0.0, dur_s, padding=0.02)
         self.file_preview.setPlainText(_file_preview_text(store))
-        self.led.set_state("work", f"1/3 Building ~{OVERVIEW_PICTURES}-picture overview…")
+        self._set_status("work", f"1/3 Building ~{OVERVIEW_PICTURES}-picture overview…")
         self._start_bin(self._overview_params(), "overview")
 
     def _overview_params(self) -> BinParams:
@@ -567,7 +650,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_load_failed(self, message: str) -> None:
-        self.led.set_state("err", "Load failed")
+        self._set_status("err", "Load failed")
         QMessageBox.critical(self, "Load failed", message)
 
     def _selected_window_us(self) -> tuple[int, int]:
@@ -760,7 +843,7 @@ class MainWindow(QMainWindow):
             self._suggest_dt_from_overview()
             self.apply_btn.setEnabled(True)
             self._set_playhead_s(0.0)
-            self.led.set_state(
+            self._set_status(
                 "ok",
                 f"Overview ready ({n} pictures). Scrub the timeline, set the yellow "
                 "start/end, choose Δt, then send to BLITZ.",
@@ -770,9 +853,12 @@ class MainWindow(QMainWindow):
         self.publisher.set_stack(net, push=True)
         self.push_btn.setEnabled(True)
         if self._blitz_clients <= 0:
-            self.led.set_state("wait", "3/3 Pictures ready — connect BLITZ Network, or wait for download…")
+            self._set_status(
+                "wait",
+                "3/3 Pictures ready — connect BLITZ Stream, or wait for download…",
+            )
         else:
-            self.led.set_state("wait", "3/3 Sending to BLITZ…")
+            self._set_status("wait", "3/3 Sending to BLITZ…")
         self.statusBar().showMessage(f"Sent {tuple(net.shape)} in {elapsed * 1000:.0f} ms")
 
     def _export_params(self) -> BinParams:
@@ -828,28 +914,54 @@ class MainWindow(QMainWindow):
             )
             if yes != QMessageBox.StandardButton.Yes:
                 return
-        self.led.set_state("work", "2/3 Building pictures for BLITZ…")
+        self._set_status("work", "2/3 Building pictures for BLITZ…")
         self._start_bin(self._export_params(), "export")
 
     def _repush(self) -> None:
         self.publisher.push()
-        self.led.set_state(
+        self._set_status(
             "wait",
-            "Sending last pictures again…" if self._blitz_clients else "Waiting for BLITZ to connect…",
+            "Sending last pictures again…"
+            if self._blitz_clients
+            else "Waiting for BLITZ Stream — Connect in BLITZ → Stream."
         )
 
     def _on_blitz_downloaded(self, nbytes: int) -> None:
         mb = nbytes / (1024 * 1024)
-        self.led.set_state("ok", f"BLITZ received the stack ({mb:.1f} MB)")
+        self._set_status("ok", f"BLITZ received the stack ({mb:.1f} MB)")
 
     def _on_client_count(self, n: int) -> None:
+        prev = self._blitz_clients
         self._blitz_clients = n
+        if n == prev:
+            return
+        detail = self.led.label.text()
+        if n > 0:
+            suffix = f"BLITZ Stream connected ({n})"
+        else:
+            suffix = "waiting for BLITZ Stream"
+        self.statusBar().showMessage(
+            f"Serving {self.publisher.base_url}  ·  {suffix}"
+        )
+        if self.led.kind == "work" or "received the stack" in detail:
+            return
+        if n > 0:
+            if "Pictures ready" in detail or "Sending" in detail or "download" in detail.lower():
+                self._set_status("wait", "BLITZ Stream connected — downloading…")
+            else:
+                self._set_status("ok", "BLITZ Stream connected — send when ready.")
+        elif prev > 0:
+            self._set_status(
+                "wait",
+                "BLITZ Stream disconnected — Connect in BLITZ → Stream.",
+            )
 
     def _on_bin_failed(self, message: str) -> None:
-        self.led.set_state("err", "Failed")
+        self._set_status("err", "Failed")
         QMessageBox.critical(self, "Failed", message)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.led._set_busy_cursor(False)
         for thread in (self._bin_thread, self._load_thread):
             if thread is not None and thread.isRunning():
                 thread.quit()

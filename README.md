@@ -19,7 +19,7 @@ flowchart LR
   bin --> npy[".npy float32 or uint8"]
   reader -->|"send_file_message"| sio["Socket.IO"]
   npy --> http["HTTP GET /token?filename="]
-  sio --> blitz["BLITZ Network"]
+  sio --> blitz["BLITZ Stream"]
   http --> blitz
 ```
 
@@ -39,6 +39,8 @@ stays open for logs.
 ## Use with BLITZ
 
 Nothing is sent until you click **Build pictures and send to BLITZ**.
+The coloured bar under the file path is the status (decoding, sending, BLITZ Stream
+connected / received) — not a tiny traffic light.
 
 1. **Open** a `.raw` file. The window shows the RAW header and first events
    (about ten lines) plus a coarse **overview** (~150 pictures, local only).
@@ -51,7 +53,7 @@ Nothing is sent until you click **Build pictures and send to BLITZ**.
    **Normalize**, **Grayscale**). Default send is **float32 event counts** —
    no clip at 255. RAM yellow ≥ 1/8 of installed RAM, red ≥ 1/4; more than
    1000 pictures is allowed but uncomfortable in BLITZ.
-5. In BLITZ → **Network**: address `http://127.0.0.1:5055`, token `evt` →
+5. In BLITZ → **Stream**: address `http://127.0.0.1:5055`, token `evt` →
    Connect, then send. BLITZ File-tab options (8-bit / Normalize / Grayscale)
    apply on Connect too. **Gzip** is a checkbox, default off (localhost).
    **Log stretch** is only available with 8-bit.
