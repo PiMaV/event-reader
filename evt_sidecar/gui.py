@@ -57,7 +57,6 @@ from .binning import (
     encode_stack_for_send,
     even_odd_row_ratio,
     event_rate_ms,
-    plan_overview,
     plan_pictures,
 )
 from .evt3 import EventStore, load_evt3_raw
@@ -394,6 +393,8 @@ class MainWindow(QMainWindow):
         self._overview_t0_us = 0
         self._overview_full_t0_us = 0
         self._overview_is_detail = False
+        self._overview_applied_sig: tuple | None = None
+        self._overview_full_sig: tuple | None = None
         self._showing_activity = False
         self._crop_roi: pg.RectROI | None = None
         self._crop_roi_wanted = False
@@ -412,6 +413,10 @@ class MainWindow(QMainWindow):
         self._rate_zoom_timer.setSingleShot(True)
         self._rate_zoom_timer.setInterval(120)
         self._rate_zoom_timer.timeout.connect(self._refresh_rate_curve_from_view)
+        self._filter_preview_timer = QTimer(self)
+        self._filter_preview_timer.setSingleShot(True)
+        self._filter_preview_timer.setInterval(280)
+        self._filter_preview_timer.timeout.connect(self._rebuild_preview_for_filters)
 
         self._bridge = _NetBridge(self)
         self._bridge.served.connect(self._on_blitz_downloaded)
@@ -468,8 +473,9 @@ class MainWindow(QMainWindow):
             "Wheel or the white playhead scrubs pictures (like BLITZ). "
             "Ctrl+wheel or right-drag zooms time; double-click resets to the "
             "full file. Yellow band = the range you will send. "
-            "O rebuilds the overview for that yellow range and zooms the "
-            "timeline to it. M shows a window activity image so you can set "
+            "O rebuilds the overview for that yellow range at the Δt below "
+            "(same pictures BLITZ will get) and zooms the timeline to it. "
+            "M shows a window activity image so you can set "
             "a crop rectangle."
         ))
         self.preview = pg.ImageView()
@@ -523,9 +529,9 @@ class MainWindow(QMainWindow):
         self.restag_btn = QPushButton("Rebuild overview for selection (O)")
         self.restag_btn.setEnabled(False)
         self.restag_btn.setToolTip(
-            "Zoom the timeline to the yellow band and re-bin the overview "
-            "for that range. The full-file overview stays cached for reset "
-            "(double-click the plot)."
+            "Zoom to the yellow band and re-bin the overview at the current "
+            "Δt — the same pictures you will send to BLITZ. "
+            "The coarse full-file overview stays cached (double-click the plot)."
         )
         self.restag_btn.clicked.connect(self._restag_overview_for_view)
         self.activity_btn = QPushButton("Window max / set crop (M)")
@@ -550,15 +556,29 @@ class MainWindow(QMainWindow):
         self.dt_ms = QDoubleSpinBox()
         self.dt_ms.setRange(SENSOR_DT_US / 1000.0, 1_000_000.0)
         self.dt_ms.setDecimals(3)
-        self.dt_ms.setSingleStep(0.1)
+        self.dt_ms.setSingleStep(0.01)
         self.dt_ms.setValue(1.0)
         self.dt_ms.setSuffix(" ms")
         self.dt_ms.setToolTip(
-            "How long each picture integrates. Sensor timestamps step by 1 µs "
-            "(0.001 ms). Picture count is limited only by RAM (yellow/red below)."
+            "How long each picture integrates — preview rebuild and BLITZ send "
+            "use this same Δt. Sensor timestamps step by 1 µs (0.001 ms). "
+            "Use suggested Δt for ~150 pictures in the yellow band, or type "
+            "your own. Picture count is limited only by RAM (yellow/red below)."
         )
         self.dt_ms.valueChanged.connect(self._refresh_plan_label)
-        form.addRow("Frame time (Δt)", self.dt_ms)
+        self.suggest_dt_btn = QPushButton("Use suggested")
+        self.suggest_dt_btn.setEnabled(False)
+        self.suggest_dt_btn.setToolTip(
+            "Set Δt so the yellow band becomes about 150 pictures. "
+            "You can still type a finer or coarser value."
+        )
+        self.suggest_dt_btn.clicked.connect(self._apply_suggested_dt)
+        dt_wrap = QWidget()
+        dt_row = QHBoxLayout(dt_wrap)
+        dt_row.setContentsMargins(0, 0, 0, 0)
+        dt_row.addWidget(self.dt_ms)
+        dt_row.addWidget(self.suggest_dt_btn)
+        form.addRow("Frame time (Δt)", dt_wrap)
         self.min_dt_label = QLabel(
             "Sensor timestamps at 1 µs (relative to the start of this file, "
             "not wall-clock). Stack size is a soft RAM limit — see the bar."
@@ -615,15 +635,15 @@ class MainWindow(QMainWindow):
         self.drop_isolated_box.setToolTip(
             "After binning: zero pixels that have a count but all 8 neighbours "
             "are empty. Optional — a real 1-pixel event is removed too. "
-            "Applied on send only; check the result in BLITZ."
+            "Updates the local preview immediately; send uses the same setting."
         )
-        self.drop_isolated_box.toggled.connect(self._refresh_plan_label)
+        self.drop_isolated_box.toggled.connect(self._on_filter_checkbox)
         self.neighbor_box = QCheckBox("Temporal neighbour")
         self.neighbor_box.setChecked(False)
         self.neighbor_box.setToolTip(
             "Before binning: keep an event only if a pixel in its 3×3 "
             "neighbourhood already fired within Δt. Isolated salt-and-pepper "
-            "events drop. Applied on send only."
+            "events drop. Updates the local preview; send uses the same setting."
         )
         self.neighbor_box.toggled.connect(self._on_neighbor_toggled)
         self.neighbor_dt_ms = QDoubleSpinBox()
@@ -633,8 +653,11 @@ class MainWindow(QMainWindow):
         self.neighbor_dt_ms.setValue(3.0)
         self.neighbor_dt_ms.setSuffix(" ms")
         self.neighbor_dt_ms.setEnabled(False)
-        self.neighbor_dt_ms.setToolTip("Neighbourhood time window for the temporal filter.")
-        self.neighbor_dt_ms.valueChanged.connect(self._refresh_plan_label)
+        self.neighbor_dt_ms.setToolTip(
+            "Neighbourhood time window for the temporal filter. "
+            "The preview rebuilds after a short pause while you edit."
+        )
+        self.neighbor_dt_ms.valueChanged.connect(self._on_neighbor_dt_changed)
         nn_row = QHBoxLayout()
         nn_row.setContentsMargins(0, 0, 0, 0)
         nn_row.addWidget(self.neighbor_box)
@@ -780,6 +803,8 @@ class MainWindow(QMainWindow):
         self._overview = None
         self._overview_full = None
         self._overview_is_detail = False
+        self._overview_applied_sig = None
+        self._overview_full_sig = None
         self._showing_activity = False
         self._crop_roi_wanted = False
         self._remove_crop_roi()
@@ -804,6 +829,7 @@ class MainWindow(QMainWindow):
         self.restag_btn.setEnabled(False)
         self.activity_btn.setEnabled(False)
         self.reset_crop_btn.setEnabled(False)
+        self.suggest_dt_btn.setEnabled(False)
         self._set_status("work", f"1/3 Building ~{OVERVIEW_PICTURES}-picture overview…")
         self._start_bin(self._overview_params(), "overview")
 
@@ -814,7 +840,11 @@ class MainWindow(QMainWindow):
         else:
             t0, t1 = int(self._store.t_min), int(self._store.t_max)
         window_us = max(1, t1 - t0)
-        dt_us, n, _u = plan_overview(window_us, n_frames=OVERVIEW_PICTURES)
+        if yellow:
+            dt_us = self._user_dt_us()
+            dt_us, n, _u = plan_pictures(window_us, dt_us=dt_us)
+        else:
+            dt_us, n, _u = plan_pictures(window_us, n_frames=OVERVIEW_PICTURES)
         return BinParams(
             dt_us=dt_us,
             polarity=self.polarity.currentData(),
@@ -822,6 +852,8 @@ class MainWindow(QMainWindow):
             t0_us=t0,
             t1_us=t1,
             max_frames=n,
+            drop_isolated=self.drop_isolated_box.isChecked(),
+            neighbor_dt_us=self._neighbor_dt_us(),
         )
 
     def _on_load_failed(self, message: str) -> None:
@@ -874,6 +906,14 @@ class MainWindow(QMainWindow):
         t_s = max(0.0, min(dur, t_s))
         if self._showing_activity and self._overview is not None:
             self._show_overview_stack()
+            busy = (
+                self._bin_thread is not None and self._bin_thread.isRunning()
+            )
+            if (
+                not busy
+                and self._overview_applied_sig != self._filter_sig()
+            ):
+                self._rebuild_preview_for_filters()
         self._playhead_s = t_s
         self._syncing_range = True
         self.playhead.setValue(t_s)
@@ -938,7 +978,7 @@ class MainWindow(QMainWindow):
             return
         t0, t1 = self._selected_window_us()
         window_us = t1 - t0
-        dt_us = max(SENSOR_DT_US, int(round(self.dt_ms.value() * 1000.0)))
+        dt_us = self._user_dt_us()
         dt_us, n, _used_us = plan_pictures(window_us, dt_us=dt_us)
         span_s = window_us / 1_000_000.0
         t0_s = (t0 - self._store.t_min) / 1_000_000.0
@@ -956,17 +996,17 @@ class MainWindow(QMainWindow):
         else:
             x0, y0, x1, y1 = crop
             crop_txt = f"crop {x1 - x0}×{y1 - y0} at ({x0},{y0})"
-        filt = []
-        if self.drop_isolated_box.isChecked():
-            filt.append("1-pixel")
-        if self.neighbor_box.isChecked():
-            filt.append(f"neighbour {self.neighbor_dt_ms.value():.3f} ms")
-        filt_txt = ("filters: " + ", ".join(filt)) if filt else "filters off"
+        filt_txt = self._filter_brief()
+        sug_us, sug_n, _u = plan_pictures(window_us, n_frames=OVERVIEW_PICTURES)
         self.min_dt_label.setText(
             f"Time in this file starts at 0 (first event), not the clock. "
             f"Timestamps step by {SENSOR_DT_US} µs. "
             f"Selected {t0_s:.4f}–{t1_s:.4f} s ({span_s:.3f} s). "
-            f"Δt = {dt_us / 1000.0:.3f} ms. {crop_txt}. {filt_txt}. "
+            f"Δt = {dt_us / 1000.0:.3f} ms → {n} pictures (preview rebuild "
+            f"and BLITZ send use this). "
+            f"Suggested for ~{OVERVIEW_PICTURES} pictures: "
+            f"{sug_us / 1000.0:.3f} ms ({sug_n} pics). "
+            f"{crop_txt}. {filt_txt}. "
             f"Yellow ≥ {fmt_bytes(int(y_b))} (1/8 RAM), "
             f"red ≥ {fmt_bytes(int(r_b))} (1/4 RAM). "
             f"Above {NAV_WARN_FRAMES} pictures BLITZ becomes uncomfortable to scrub."
@@ -1008,6 +1048,135 @@ class MainWindow(QMainWindow):
         self.dt_ms.blockSignals(True)
         self.dt_ms.setValue(self._overview_dt_us / 1000.0)
         self.dt_ms.blockSignals(False)
+        self._refresh_plan_label()
+
+    def _user_dt_us(self) -> int:
+        return max(SENSOR_DT_US, int(round(self.dt_ms.value() * 1000.0)))
+
+    def _neighbor_dt_us(self) -> int | None:
+        if not self.neighbor_box.isChecked():
+            return None
+        return max(SENSOR_DT_US, int(round(self.neighbor_dt_ms.value() * 1000.0)))
+
+    def _filter_sig(self) -> tuple:
+        return (
+            bool(self.drop_isolated_box.isChecked()),
+            self._neighbor_dt_us(),
+            self.polarity.currentData(),
+        )
+
+    def _filter_brief(self) -> str:
+        parts: list[str] = []
+        if self.drop_isolated_box.isChecked():
+            parts.append("1-pixel")
+        if self.neighbor_box.isChecked():
+            parts.append(f"neighbour {self.neighbor_dt_ms.value():.3f} ms")
+        return ("filters: " + ", ".join(parts)) if parts else "filters off"
+
+    def _filter_status_suffix(self) -> str:
+        brief = self._filter_brief()
+        if brief == "filters off":
+            return ""
+        return f" {brief}."
+
+    def _on_filter_checkbox(self, *_args) -> None:  # noqa: ANN001
+        self._filter_preview_timer.stop()
+        self._refresh_plan_label()
+        self._rebuild_preview_for_filters()
+
+    def _on_neighbor_dt_changed(self, *_args) -> None:  # noqa: ANN001
+        self._refresh_plan_label()
+        if not self.neighbor_box.isChecked():
+            return
+        if self._store is None or self._overview is None:
+            return
+        self._filter_preview_timer.start()
+
+    def _rebuild_preview_for_filters(self) -> None:
+        if self._store is None or self._overview is None:
+            return
+        brief = self._filter_brief()
+        if self._showing_activity:
+            self._set_status("work", f"Updating window max ({brief})…")
+            self._start_bin(self._activity_params(), "activity")
+            return
+        yellow = self._overview_is_detail
+        kind = "overview_view" if yellow else "overview"
+        self._set_status("work", f"Updating preview ({brief})…")
+        self._start_bin(self._overview_params(yellow=yellow), kind)
+
+    def _apply_suggested_dt(self) -> None:
+        if self._store is None:
+            return
+        t0, t1 = self._selected_window_us()
+        dt_us, _n, _u = plan_pictures(t1 - t0, n_frames=OVERVIEW_PICTURES)
+        self.dt_ms.setValue(dt_us / 1000.0)
+
+    def _interlace_hint(self, arr: np.ndarray) -> str:
+        ratio = even_odd_row_ratio(arr)
+        if ratio <= INTERLACE_RATIO_WARN:
+            return ""
+        dt = self._user_dt_us()
+        scale = (
+            f" Δt is {dt / 1000.0:.3f} ms (below 1 ms)."
+            if dt < INTERLACE_DT_US
+            else f" Δt is {dt / 1000.0:.3f} ms."
+        )
+        return (
+            f" Even/odd rows differ ×{ratio:.1f} — likely sensor readout, "
+            f"not the decoder.{scale}"
+        )
+
+    def _preview_budget(self) -> StackBudget | None:
+        if self._store is None:
+            return None
+        t0, t1 = self._selected_window_us()
+        dt_us, n, _u = plan_pictures(t1 - t0, dt_us=self._user_dt_us())
+        ram = read_ram()
+        itemsize = 1 if self.eight_bit.isChecked() else 4
+        return assess_stack(
+            n,
+            self._store.height,
+            self._store.width,
+            ram,
+            wire_itemsize=itemsize,
+        )
+
+    def _confirm_stack(self, budget: StackBudget | None, *, preview: bool) -> bool:
+        if budget is None:
+            return True
+        place = "this preview" if preview else "the wire"
+        if budget.level == "block":
+            QMessageBox.critical(
+                self,
+                "Not enough RAM",
+                f"{budget.n_frames} pictures = {fmt_bytes(budget.wire_bytes)} "
+                f"for {place}, but only {fmt_bytes(read_ram().available)} is free. "
+                "Raise Δt, shrink the yellow band, or crop.",
+            )
+            return False
+        if budget.level != "red" and not budget.nav_warn:
+            return True
+        parts: list[str] = []
+        if budget.nav_warn:
+            parts.append(
+                f"{budget.n_frames} pictures — more than {NAV_WARN_FRAMES} is "
+                "not comfortable to scrub. Continue only if you know you need this."
+            )
+        if budget.level == "red":
+            parts.append(
+                f"{fmt_bytes(budget.wire_bytes)} is "
+                f"{budget.fraction_of_total:.0%} of this PC's RAM. "
+                "BLITZ will hold another copy if you send."
+            )
+        yes = QMessageBox.warning(
+            self,
+            "Check before preview" if preview else "Check before send",
+            "\n\n".join(parts),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return yes == QMessageBox.StandardButton.Yes
 
     def _queue_or_keep_pending(self, params: BinParams, kind: str) -> None:
         pending = self._pending_bin
@@ -1092,7 +1261,8 @@ class MainWindow(QMainWindow):
             else:
                 self._set_status(
                     "ok",
-                    f"Window max ({n_pos:,} lit pixels, log counts). "
+                    f"Window max ({n_pos:,} lit pixels, log counts)."
+                    f"{self._filter_status_suffix()} "
                     "Drag the green rectangle to crop before send. "
                     "Scrub the timeline to return to the overview.",
                 )
@@ -1122,10 +1292,14 @@ class MainWindow(QMainWindow):
                 self._overview_is_detail = False
             else:
                 self._overview_is_detail = True
+            self._overview_applied_sig = self._filter_sig()
+            if kind == "overview":
+                self._overview_full_sig = self._overview_applied_sig
             n = net.shape[0]
             self.restag_btn.setEnabled(True)
             self.activity_btn.setEnabled(True)
             self.reset_crop_btn.setEnabled(True)
+            self.suggest_dt_btn.setEnabled(True)
             if first_full and kind == "overview":
                 self._suggest_dt_from_overview()
             self._show_overview_stack()
@@ -1134,37 +1308,28 @@ class MainWindow(QMainWindow):
             self.apply_btn.setEnabled(True)
             if kind == "overview_view":
                 dt_ms = self._overview_dt_us / 1000.0
-                extra = ""
-                if n < OVERVIEW_PICTURES:
-                    extra = (
-                        f" Preview Δt is at least 1 ms ({n} pictures) so frames "
-                        "stay filled; send Δt can still go below 1 ms."
-                    )
+                hint = self._interlace_hint(arr)
                 self._set_status(
                     "ok",
-                    f"Detail overview ready ({n} pictures, "
-                    f"{dt_ms:.3f} ms each).{extra} "
-                    "Tighten the yellow band, then send to BLITZ.",
+                    f"Preview ready ({n} pictures, {dt_ms:.3f} ms each) — "
+                    f"same Δt as a BLITZ send.{self._filter_status_suffix()}"
+                    f"{hint} "
+                    "Scrub here to inspect; send when it looks right.",
                 )
             else:
                 self._set_status(
                     "ok",
-                    f"Overview ready ({n} pictures). Scrub the timeline, set the "
-                    "yellow start/end, choose Δt, then send to BLITZ.",
+                    f"Overview ready ({n} pictures)."
+                    f"{self._filter_status_suffix()} "
+                    "Scrub the timeline, set the yellow start/end, choose Δt, "
+                    "then send to BLITZ.",
                 )
             self._refresh_plan_label()
             return
 
         self.publisher.set_stack(net, push=True)
         self.push_btn.setEnabled(True)
-        hint = ""
-        if params is not None and params.clamp_dt() < INTERLACE_DT_US:
-            ratio = even_odd_row_ratio(arr)
-            if ratio > INTERLACE_RATIO_WARN:
-                hint = (
-                    f"  Even/odd rows differ ×{ratio:.1f} — may be sensor "
-                    "readout, not a decoder bug. Try Δt ≥ 1 ms."
-                )
+        hint = self._interlace_hint(arr)
         if self._blitz_clients <= 0:
             self._set_status(
                 "wait",
@@ -1213,14 +1378,9 @@ class MainWindow(QMainWindow):
     def _export_params(self) -> BinParams:
         assert self._store is not None
         t0, t1 = self._selected_window_us()
-        dt_us = max(SENSOR_DT_US, int(round(self.dt_ms.value() * 1000.0)))
+        dt_us = self._user_dt_us()
         dt_us, n, _u = plan_pictures(t1 - t0, dt_us=dt_us)
         crop = self._crop_xyxy()
-        neighbor_dt = None
-        if self.neighbor_box.isChecked():
-            neighbor_dt = max(
-                SENSOR_DT_US, int(round(self.neighbor_dt_ms.value() * 1000.0))
-            )
         x0 = y0 = x1 = y1 = None
         if crop is not None:
             x0, y0, x1, y1 = crop
@@ -1236,48 +1396,15 @@ class MainWindow(QMainWindow):
             x1=x1,
             y1=y1,
             drop_isolated=self.drop_isolated_box.isChecked(),
-            neighbor_dt_us=neighbor_dt,
+            neighbor_dt_us=self._neighbor_dt_us(),
         )
 
     def _export_to_blitz(self) -> None:
         if self._store is None:
             return
         self._refresh_plan_label()
-        budget = self._stack_budget
-        if budget is not None and budget.level == "block":
-            QMessageBox.critical(
-                self,
-                "Not enough RAM",
-                f"{budget.n_frames} pictures = {fmt_bytes(budget.wire_bytes)} "
-                f"on the wire, but only {fmt_bytes(read_ram().available)} is free. "
-                "Raise Δt, shrink the yellow band, or crop.",
-            )
+        if not self._confirm_stack(self._stack_budget, preview=False):
             return
-        if budget is not None and (
-            budget.level == "red" or budget.nav_warn
-        ):
-            parts: list[str] = []
-            if budget.nav_warn:
-                parts.append(
-                    f"{budget.n_frames} pictures — more than {NAV_WARN_FRAMES} is "
-                    "not comfortable in BLITZ (timeline too fine-grained). "
-                    "Continue only if you know you need this."
-                )
-            if budget.level == "red":
-                parts.append(
-                    f"{fmt_bytes(budget.wire_bytes)} is "
-                    f"{budget.fraction_of_total:.0%} of this PC's RAM on the wire. "
-                    "BLITZ will hold another copy."
-                )
-            yes = QMessageBox.warning(
-                self,
-                "Check before send",
-                "\n\n".join(parts),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if yes != QMessageBox.StandardButton.Yes:
-                return
         self._set_status("work", "2/3 Building pictures for BLITZ…")
         self._start_bin(self._export_params(), "export")
 
@@ -1397,25 +1524,39 @@ class MainWindow(QMainWindow):
             return
         dur = self._duration_s()
         self._set_time_view(0.0, dur)
-        if self._overview_full is not None:
+        if (
+            self._overview_full is not None
+            and self._overview_full_sig == self._filter_sig()
+        ):
             self._overview = self._overview_full
             self._overview_dt_us = self._overview_full_dt_us
             self._overview_t0_us = self._overview_full_t0_us
             self._overview_is_detail = False
+            self._overview_applied_sig = self._overview_full_sig
             self._show_overview_stack()
+        elif self._store is not None:
+            self._overview_is_detail = False
+            self._set_status(
+                "work",
+                f"Rebuilding full-file overview ({self._filter_brief()})…",
+            )
+            self._start_bin(self._overview_params(yellow=False), "overview")
         self._set_playhead_s(self._playhead_s)
 
     def _restag_overview_for_view(self) -> None:
         if self._store is None or self._overview is None:
             return
+        if not self._confirm_stack(self._preview_budget(), preview=True):
+            return
         x0, x1 = self._region_range_s()
         self._set_time_view(x0, x1)
         if self._playhead_s < x0 or self._playhead_s > x1:
             self._set_playhead_s(x0)
+        dt_ms = self._user_dt_us() / 1000.0
         self._set_status(
             "work",
-            f"Rebuilding overview for the yellow selection "
-            f"({x0:.4f}–{x1:.4f} s)…",
+            f"Rebuilding preview at Δt = {dt_ms:.3f} ms for "
+            f"{x0:.4f}–{x1:.4f} s…",
         )
         self._start_bin(self._overview_params(yellow=True), "overview_view")
 
@@ -1430,7 +1571,7 @@ class MainWindow(QMainWindow):
 
     def _on_neighbor_toggled(self, checked: bool) -> None:
         self.neighbor_dt_ms.setEnabled(bool(checked))
-        self._refresh_plan_label()
+        self._on_filter_checkbox()
 
     def _activity_params(self) -> BinParams:
         assert self._store is not None
@@ -1443,6 +1584,8 @@ class MainWindow(QMainWindow):
             t0_us=t0,
             t1_us=t1,
             max_frames=1,
+            drop_isolated=self.drop_isolated_box.isChecked(),
+            neighbor_dt_us=self._neighbor_dt_us(),
         )
 
     def _show_activity_crop(self) -> None:

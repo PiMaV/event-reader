@@ -1,6 +1,6 @@
-"""Optional noise filters for the EVT → BLITZ export path.
+"""Optional noise filters for the local preview and the BLITZ send.
 
-Overview pictures stay raw. Both filters are off by default.
+Both filters are off by default. Preview and send use the same flags.
 """
 
 from __future__ import annotations

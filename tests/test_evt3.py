@@ -155,15 +155,10 @@ def test_plan_pictures() -> None:
     assert n == 10_000
     assert used == 10_000_000
 
-
-def test_plan_overview_floors_dt_at_1ms() -> None:
-    from evt_sidecar.binning import OVERVIEW_MIN_DT_US, plan_overview, plan_pictures
-
+    # Short window: ~150 pictures may be finer than 1 ms — that is allowed
     dt, n, _u = plan_pictures(40_000, n_frames=150)
-    assert dt < OVERVIEW_MIN_DT_US
-    dt_ov, n_ov, _u = plan_overview(40_000)
-    assert dt_ov == OVERVIEW_MIN_DT_US
-    assert n_ov == 40
+    assert dt < 1000
+    assert n >= 150
 
 
 def test_activity_preview_levels() -> None:

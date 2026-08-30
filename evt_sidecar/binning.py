@@ -154,8 +154,7 @@ def bin_events(store: EventStore, params: BinParams) -> np.ndarray:
 
 SENSOR_DT_US = 1  # EVT3 timestamp tick
 OVERVIEW_PICTURES = 150
-OVERVIEW_MIN_DT_US = 1000  # 1 ms — finer overview bins look like empty stripes
-INTERLACE_DT_US = 1000  # hint only when send Δt is below 1 ms
+INTERLACE_DT_US = 1000  # even/odd hint is extra-loud below 1 ms
 INTERLACE_RATIO_WARN = 3.0
 
 
@@ -181,24 +180,6 @@ def plan_pictures(
         n = max(1, int((window_us + dt - 1) // dt))
     used = min(window_us, n * dt)
     return dt, n, used
-
-
-def plan_overview(
-    window_us: int,
-    *,
-    n_frames: int = OVERVIEW_PICTURES,
-    min_dt_us: int = OVERVIEW_MIN_DT_US,
-) -> tuple[int, int, int]:
-    """Overview pictures for a window, but never finer than ``min_dt_us``.
-
-    A short zoom would otherwise make Δt ≪ 1 ms (150 pictures over 40 ms
-    → 0.27 ms). Those frames are almost empty and look like readout stripes.
-    Send Δt can still go down to 1 µs.
-    """
-    dt_us, n, used = plan_pictures(window_us, n_frames=n_frames)
-    if dt_us < min_dt_us:
-        return plan_pictures(window_us, dt_us=min_dt_us)
-    return dt_us, n, used
 
 
 def activity_preview(img: np.ndarray) -> tuple[np.ndarray, float, float, int]:

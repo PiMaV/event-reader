@@ -15,12 +15,12 @@ flowchart TD
   load[Load RAW] --> fullOv[Full-file overview 150]
   fullOv --> scrub[Scrub plus yellow band]
   scrub --> zoom[Zoom time axis]
-  zoom --> restag[On demand: restag 150 pics for view]
-  restag --> tight[Tighten yellow band]
+  zoom --> restag[On demand: restag yellow band at Δt]
+  restag --> filt[Live noise filters]
+  filt --> tight[Tighten yellow band]
   tight --> maxImg[Key: window activity image]
   maxImg --> rect[Rect crop on that image]
-  rect --> optFilt[Optional noise filters]
-  optFilt --> send[Bin cropped window send to BLITZ]
+  rect --> send[Bin cropped window send to BLITZ]
 ```
 
 Transport after **Build pictures and send to BLITZ**:
@@ -69,11 +69,12 @@ connected / received) — not a tiny traffic light.
    Ctrl still scrubs. Double-click the plot to reset to the full file (the
    coarse overview is cached).
 4. Drag the **yellow band** to the range you will send. The handles sit
-   slightly inside the plot so they are not on the window frame. **Rebuild
-   overview for selection (O)** zooms the timeline to that band and re-bins
-   the overview there. Overview Δt is never below **1 ms** (fewer pictures
-   if the view is short) — finer bins look like empty stripes. Send Δt can
-   still go down to 1 µs. Double-click the plot to reset to the full file.
+   slightly inside the plot so they are not on the window frame. Set **Δt**
+   (or **Use suggested** for ~150 pictures in that band). **Rebuild overview
+   for selection (O)** zooms the timeline and re-bins at **that same Δt** —
+   what you see is what BLITZ will get, including sparse or striped frames.
+   Even/odd row imbalance is reported in the status bar. Double-click the
+   plot to reset to the full-file overview.
 5. **Window max / set crop (M)** builds one activity picture of the yellow
    band (log of event counts, so hot pixels do not crush the structure).
    Drag the **green rectangle** to crop before send — same idea as a BLITZ
@@ -82,18 +83,21 @@ connected / received) — not a tiny traffic light.
 6. Set **frame time (Δt)** and the File-tab-like options (**8-bit**,
    **Normalize**, **Grayscale**). Optional **noise filter** (off by default):
    1-pixel spatial after binning, and/or a temporal 3×3 neighbour filter on
-   the event list. Send twice (off then on) to compare in BLITZ. Default send
-   is **float32 event counts** — no clip at 255. RAM yellow ≥ 1/8 of installed
-   RAM, red ≥ 1/4; more than 1000 pictures is allowed but uncomfortable in
-   BLITZ.
+   the event list. Toggling a filter **rebuilds the local preview** (and
+   window max if that is on screen) with the same flags as send — no BLITZ
+   round-trip. Neighbour Δt applies after a short pause while you edit.
+   Default send is **float32 event counts** — no clip at 255. RAM yellow ≥
+   1/8 of installed RAM, red ≥ 1/4; more than 1000 pictures is allowed but
+   uncomfortable in BLITZ.
 7. In BLITZ → **Stream**: address `http://127.0.0.1:5055`, token `evt` →
    Connect, then send. BLITZ File-tab options (8-bit / Normalize / Grayscale)
    apply on Connect too. **Gzip** is a checkbox, default off (localhost).
    **Log stretch** is only available with 8-bit.
 
-If you send with Δt **below 1 ms** and even/odd rows look very different, the
-status bar notes it. That is usually sensor readout, not the EVT3 decoder —
-there is no silent deinterlace. Try Δt ≥ 1 ms, or inspect the stack in BLITZ.
+If even/odd rows look very different after a preview rebuild or send, the
+status bar notes it (louder when Δt is below 1 ms). That is usually sensor
+readout, not the EVT3 decoder — there is no silent deinterlace. Inspect in
+the sidecar first; BLITZ will show the same Δt.
 
 | Option | Event reader | BLITZ File tab on Connect |
 |--------|--------------|---------------------------|
@@ -102,7 +106,7 @@ there is no silent deinterlace. Try Δt ≥ 1 ms, or inspect the stack in BLITZ.
 | Grayscale | on (counts are already one channel) | applied if checked |
 | Gzip | opt-in, default off | — |
 | Crop | green rectangle after **M**, applied on send | load-dialog ROI (not on Stream ingest) |
-| Noise filter | optional, send path only | — |
+| Noise filter | optional, live on preview and on send | — |
 
 Do not turn **8-bit** on in both places unless you want two quantizations.
 
@@ -154,19 +158,7 @@ runs tests, then Windows + Ubuntu jobs, and publishes both files on a Release
 
 ## Later (backlog)
 
-**Interlace / even–odd rows on binned pictures** — still open. Confirmed on
-real recordings **even with overview Δt ≥ 1 ms** (the preview floor does not
-remove the stripes). Looks like sensor readout or vendor packing (dark even or
-odd lines), not the EVT3 decoder and not a BLITZ LUT. Today the reader only
-**warns** when send Δt is under 1 ms and even/odd row means differ a lot. No
-merge/interpolate filter until a **known sample** is kept and an optional
-deinterlace is designed against it.
-
-**Show noise-filter effect in the sidecar** — today the 1-pixel and temporal
-neighbour filters run only on **send** (compare in BLITZ). The overview stays
-raw, so you cannot tell in EVT whether a filter helps or how to set it. Apply
-the same optional filters to the local preview (overview / window max), keep
-them off by default, and expose the knobs (at least neighbour Δt; 1-pixel may
-need a neighbourhood size). Do not require a round-trip to BLITZ to tune.
+See [`BACKLOG.md`](BACKLOG.md). Open item: optional deinterlace after a known
+sample.
 
 License: [GPL-3.0-or-later](LICENSE).
