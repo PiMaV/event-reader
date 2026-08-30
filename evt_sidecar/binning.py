@@ -8,6 +8,7 @@ from enum import Enum
 import numpy as np
 
 from .evt3 import EventStore
+from .filters import drop_isolated_pixels, neighbor_keep_mask
 
 
 class PolarityMode(str, Enum):
@@ -29,9 +30,33 @@ class BinParams:
     t0_us: int | None = None  # absolute; None = store.t_min
     t1_us: int | None = None  # absolute; None = store.t_max
     max_frames: int | None = None  # None = no hard picture cap
+    # Exclusive-end crop in sensor pixels; None = that edge is full frame
+    x0: int | None = None
+    y0: int | None = None
+    x1: int | None = None
+    y1: int | None = None
+    drop_isolated: bool = False
+    neighbor_dt_us: int | None = None  # None = temporal neighbour filter off
+    neighbor_radius: int = 1
 
     def clamp_dt(self) -> int:
         return max(1, int(self.dt_us))
+
+
+def crop_box(store: EventStore, params: BinParams) -> tuple[int, int, int, int]:
+    """Return (x0, y0, x1, y1) exclusive-end, clipped to the sensor."""
+    w, h = int(store.width), int(store.height)
+    x0 = 0 if params.x0 is None else int(params.x0)
+    y0 = 0 if params.y0 is None else int(params.y0)
+    x1 = w if params.x1 is None else int(params.x1)
+    y1 = h if params.y1 is None else int(params.y1)
+    x0 = max(0, min(w, x0))
+    y0 = max(0, min(h, y0))
+    x1 = max(0, min(w, x1))
+    y1 = max(0, min(h, y1))
+    if x1 <= x0 or y1 <= y0:
+        return 0, 0, w, h
+    return x0, y0, x1, y1
 
 
 def bin_events(store: EventStore, params: BinParams) -> np.ndarray:
@@ -39,8 +64,14 @@ def bin_events(store: EventStore, params: BinParams) -> np.ndarray:
     Return float32 stack shaped (T, height, width) — OpenCV/image convention.
     BLITZ DataLoader swapaxes(1,2) → ImageData (T, W, H).
     """
+    x0, y0, x1, y1 = crop_box(store, params)
+    out_h, out_w = y1 - y0, x1 - x0
+
+    def empty(n: int = 1) -> np.ndarray:
+        return np.zeros((n, out_h, out_w), dtype=np.float32)
+
     if len(store) == 0:
-        return np.zeros((1, store.height, store.width), dtype=np.float32)
+        return empty()
 
     dt = params.clamp_dt()
     t0 = store.t_min if params.t0_us is None else int(params.t0_us)
@@ -53,7 +84,7 @@ def bin_events(store: EventStore, params: BinParams) -> np.ndarray:
     lo = int(np.searchsorted(t, t0, side="left"))
     hi = int(np.searchsorted(t, t1, side="right"))
     if hi <= lo:
-        return np.zeros((1, store.height, store.width), dtype=np.float32)
+        return empty()
 
     t_s = t[lo:hi]
     x_s = store.x[lo:hi]
@@ -75,7 +106,21 @@ def bin_events(store: EventStore, params: BinParams) -> np.ndarray:
         weights = np.ones(t_s.shape[0], dtype=np.float32)
 
     if t_s.shape[0] == 0:
-        return np.zeros((1, store.height, store.width), dtype=np.float32)
+        return empty()
+
+    if params.neighbor_dt_us is not None:
+        keep_nn = neighbor_keep_mask(
+            t_s,
+            x_s,
+            y_s,
+            height=store.height,
+            width=store.width,
+            dt_us=int(params.neighbor_dt_us),
+            radius=int(params.neighbor_radius),
+        )
+        t_s, x_s, y_s, weights = t_s[keep_nn], x_s[keep_nn], y_s[keep_nn], weights[keep_nn]
+        if t_s.shape[0] == 0:
+            return empty()
 
     # Frame index relative to t0
     frame_idx = ((t_s.astype(np.int64) - t0) // dt).astype(np.int64)
@@ -89,23 +134,29 @@ def bin_events(store: EventStore, params: BinParams) -> np.ndarray:
         weights = weights[keep]
         n_frames = params.max_frames
 
-    h, w = store.height, store.width
-    # Drop out-of-bounds coordinates
-    inb = (x_s < w) & (y_s < h)
+    inb = (x_s >= x0) & (x_s < x1) & (y_s >= y0) & (y_s < y1)
     frame_idx = frame_idx[inb]
     x_s = x_s[inb]
     y_s = y_s[inb]
     weights = weights[inb]
+    if frame_idx.shape[0] == 0:
+        return empty(n_frames)
 
-    stack = np.zeros((n_frames, h, w), dtype=np.float32)
-    # Flat index: frame * H*W + y * W + x
-    flat = frame_idx * (h * w) + y_s.astype(np.int64) * w + x_s.astype(np.int64)
+    xs = x_s.astype(np.int64) - x0
+    ys = y_s.astype(np.int64) - y0
+    stack = np.zeros((n_frames, out_h, out_w), dtype=np.float32)
+    flat = frame_idx * (out_h * out_w) + ys * out_w + xs
     np.add.at(stack.ravel(), flat, weights)
+    if params.drop_isolated:
+        stack = drop_isolated_pixels(stack)
     return stack
 
 
 SENSOR_DT_US = 1  # EVT3 timestamp tick
 OVERVIEW_PICTURES = 150
+OVERVIEW_MIN_DT_US = 1000  # 1 ms — finer overview bins look like empty stripes
+INTERLACE_DT_US = 1000  # hint only when send Δt is below 1 ms
+INTERLACE_RATIO_WARN = 3.0
 
 
 def plan_pictures(
@@ -132,18 +183,84 @@ def plan_pictures(
     return dt, n, used
 
 
-def event_rate_ms(store: EventStore, n_bins: int = 400) -> tuple[np.ndarray, np.ndarray]:
-    """Relative time (ms) vs event counts for a region slider plot."""
+def plan_overview(
+    window_us: int,
+    *,
+    n_frames: int = OVERVIEW_PICTURES,
+    min_dt_us: int = OVERVIEW_MIN_DT_US,
+) -> tuple[int, int, int]:
+    """Overview pictures for a window, but never finer than ``min_dt_us``.
+
+    A short zoom would otherwise make Δt ≪ 1 ms (150 pictures over 40 ms
+    → 0.27 ms). Those frames are almost empty and look like readout stripes.
+    Send Δt can still go down to 1 µs.
+    """
+    dt_us, n, used = plan_pictures(window_us, n_frames=n_frames)
+    if dt_us < min_dt_us:
+        return plan_pictures(window_us, dt_us=min_dt_us)
+    return dt_us, n, used
+
+
+def activity_preview(img: np.ndarray) -> tuple[np.ndarray, float, float, int]:
+    """log1p activity stack (1, H, W) plus LUT levels so hot pixels do not crush.
+
+    Returns ``(display, lo, hi, n_positive)``. All-zero images get levels 0…1.
+    """
+    arr = np.asarray(img, dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[0]
+    disp = np.log1p(np.maximum(arr, 0.0))
+    pos = disp[disp > 0]
+    n_pos = int(pos.size)
+    if n_pos == 0:
+        return disp[None, ...], 0.0, 1.0, 0
+    hi = float(np.percentile(pos, 99.0))
+    hi = max(hi, float(np.min(pos)), 1e-6)
+    return disp[None, ...], 0.0, hi, n_pos
+
+
+def event_rate_ms(
+    store: EventStore,
+    n_bins: int = 400,
+    *,
+    t0_us: int | None = None,
+    t1_us: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Relative time (ms from first event in the file) vs event counts.
+
+    Optional ``t0_us`` / ``t1_us`` histogram only that window; x stays
+    aligned to the file origin so a zoomed plot still matches the axis.
+    """
     if len(store) == 0:
         return np.array([0.0], dtype=np.float64), np.array([0.0], dtype=np.float64)
-    t0 = int(store.t_min)
-    t1 = int(store.t_max)
+    origin = int(store.t_min)
+    t0 = origin if t0_us is None else int(t0_us)
+    t1 = int(store.t_max) if t1_us is None else int(t1_us)
     if t1 <= t0:
         t1 = t0 + 1
     counts, edges = np.histogram(store.t, bins=n_bins, range=(t0, t1))
     centers = 0.5 * (edges[:-1] + edges[1:])
-    x_ms = (centers - t0) / 1000.0
+    x_ms = (centers - origin) / 1000.0
     return x_ms, counts.astype(np.float64)
+
+
+def even_odd_row_ratio(stack: np.ndarray) -> float:
+    """max(even, odd) / max(min(even, odd), eps) of per-row mean |count|.
+
+    1.0 means balanced even/odd rows. Empty or single-row stacks return 1.0.
+    """
+    arr = np.asarray(stack, dtype=np.float32)
+    if arr.ndim == 2:
+        arr = arr[None, ...]
+    if arr.ndim != 3 or arr.shape[1] < 2:
+        return 1.0
+    even = float(np.mean(np.abs(arr[:, 0::2, :])))
+    odd = float(np.mean(np.abs(arr[:, 1::2, :])))
+    hi = max(even, odd)
+    lo = min(even, odd)
+    if hi <= 0.0:
+        return 1.0
+    return hi / max(lo, 1e-12)
 
 
 def encode_stack_for_send(

@@ -156,6 +156,36 @@ def test_plan_pictures() -> None:
     assert used == 10_000_000
 
 
+def test_plan_overview_floors_dt_at_1ms() -> None:
+    from evt_sidecar.binning import OVERVIEW_MIN_DT_US, plan_overview, plan_pictures
+
+    dt, n, _u = plan_pictures(40_000, n_frames=150)
+    assert dt < OVERVIEW_MIN_DT_US
+    dt_ov, n_ov, _u = plan_overview(40_000)
+    assert dt_ov == OVERVIEW_MIN_DT_US
+    assert n_ov == 40
+
+
+def test_activity_preview_levels() -> None:
+    from evt_sidecar.binning import activity_preview
+
+    empty = np.zeros((4, 4), dtype=np.float32)
+    disp, lo, hi, n_pos = activity_preview(empty)
+    assert disp.shape == (1, 4, 4)
+    assert n_pos == 0
+    assert hi > lo
+
+    img = np.zeros((8, 8), dtype=np.float32)
+    img[2, 2] = 1.0
+    img[3, 3] = 10_000.0
+    disp, lo, hi, n_pos = activity_preview(img)
+    assert n_pos == 2
+    assert disp[0, 2, 2] > 0
+    # Hot pixel must not set the LUT ceiling to log1p(10000) alone
+    assert hi <= float(np.log1p(10_000.0))
+    assert hi >= disp[0, 2, 2]
+
+
 def test_event_rate_ms() -> None:
     from evt_sidecar.binning import event_rate_ms
     from evt_sidecar.raw_header import RawHeader
@@ -173,6 +203,72 @@ def test_event_rate_ms() -> None:
     assert x_ms.shape == counts.shape
     assert counts.sum() == 4
     assert x_ms[-1] > 0
+
+    x_win, c_win = event_rate_ms(store, n_bins=10, t0_us=0, t1_us=300)
+    assert c_win.sum() == 3
+    assert x_win[-1] < 1.0
+
+
+def test_bin_crop_and_even_odd_ratio() -> None:
+    from evt_sidecar.binning import even_odd_row_ratio
+    from evt_sidecar.raw_header import RawHeader
+
+    store = EventStore(
+        t=np.array([0, 10, 20], dtype=np.uint64),
+        x=np.array([5, 6, 1], dtype=np.uint16),
+        y=np.array([5, 5, 1], dtype=np.uint16),
+        p=np.ones(3, dtype=np.uint8),
+        width=8,
+        height=8,
+        header=RawHeader(8, 8, "EVT3", "3.0", {}, 0),
+    )
+    cropped = bin_events(
+        store,
+        BinParams(dt_us=1000, x0=4, y0=4, x1=8, y1=8, max_frames=1),
+    )
+    assert cropped.shape == (1, 4, 4)
+    assert cropped[0, 1, 1] == pytest.approx(1.0)  # (5,5) → (1,1)
+    assert cropped[0, 1, 2] == pytest.approx(1.0)  # (6,5) → (1,2)
+    assert cropped[0].sum() == pytest.approx(2.0)
+
+    balanced = np.ones((2, 4, 4), dtype=np.float32)
+    assert even_odd_row_ratio(balanced) == pytest.approx(1.0)
+    striped = np.zeros((1, 4, 4), dtype=np.float32)
+    striped[:, 0::2, :] = 10.0
+    assert even_odd_row_ratio(striped) > 3.0
+
+
+def test_bin_neighbor_and_isolated() -> None:
+    from evt_sidecar.raw_header import RawHeader
+
+    store = EventStore(
+        t=np.array([0, 200, 10_000], dtype=np.uint64),
+        x=np.array([2, 3, 6], dtype=np.uint16),
+        y=np.array([2, 2, 6], dtype=np.uint16),
+        p=np.ones(3, dtype=np.uint8),
+        width=8,
+        height=8,
+        header=RawHeader(8, 8, "EVT3", "3.0", {}, 0),
+    )
+    raw = bin_events(store, BinParams(dt_us=20_000, max_frames=1))
+    assert raw[0, 2, 2] == pytest.approx(1.0)
+    assert raw[0, 6, 6] == pytest.approx(1.0)
+
+    nn = bin_events(
+        store,
+        BinParams(dt_us=20_000, max_frames=1, neighbor_dt_us=1000),
+    )
+    assert nn[0, 2, 2] == pytest.approx(0.0)  # first of pair dropped
+    assert nn[0, 2, 3] == pytest.approx(1.0)
+    assert nn[0, 6, 6] == pytest.approx(0.0)
+
+    despike = bin_events(
+        store,
+        BinParams(dt_us=20_000, max_frames=1, drop_isolated=True),
+    )
+    assert despike[0, 6, 6] == pytest.approx(0.0)
+    assert despike[0, 2, 2] == pytest.approx(1.0)
+    assert despike[0, 2, 3] == pytest.approx(1.0)
 
 
 def test_write_synthetic_raw_roundtrip(tmp_path: Path) -> None:
@@ -199,3 +295,22 @@ def test_write_synthetic_raw_roundtrip(tmp_path: Path) -> None:
     stack = bin_events(store, BinParams(dt_us=1000, polarity=PolarityMode.BOTH))
     assert stack.shape == (1, 8, 8)
     assert stack[0, 3, 4] == pytest.approx(2.0)
+
+
+def test_raw_paths_from_dropped(tmp_path: Path) -> None:
+    from evt_sidecar.gui import raw_paths_from_dropped
+
+    raw_a = tmp_path / "a.raw"
+    raw_b = tmp_path / "sub" / "b.raw"
+    other = tmp_path / "note.txt"
+    nested_dir = tmp_path / "sub"
+    nested_dir.mkdir()
+    raw_a.write_bytes(b"x")
+    raw_b.write_bytes(b"x")
+    other.write_text("nope")
+
+    assert raw_paths_from_dropped([raw_a]) == [raw_a]
+    assert raw_paths_from_dropped([other]) == []
+    assert raw_paths_from_dropped([tmp_path]) == [raw_a]
+    assert raw_paths_from_dropped([nested_dir]) == [raw_b]
+    assert raw_paths_from_dropped([raw_a, raw_a]) == [raw_a]
