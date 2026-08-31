@@ -26,7 +26,7 @@ flowchart TD
   maxImg --> rect[Move green crop ROI]
   rect --> applyCrop[Apply crop]
   applyCrop --> binning[Optional spatial bin]
-  binning --> send[Bin cropped window send to BLITZ]
+  binning --> send[Send to BLITZ or save NumPy]
 ```
 
 Internally the reader always bins **ON and OFF counts** (`uint16`). **Send as**
@@ -159,7 +159,8 @@ BLITZ Stream connected / received — not a tiny traffic light).
    Counts send uint16 activity. Occupancy sends uint8 0/255. RAM yellow
    ≥ 1/8 of installed RAM, red ≥ 1/4; more than 1000 pictures is allowed
    but uncomfortable in BLITZ.
-7. In panel **3** → send. Status and the RAM bar are here too. In BLITZ → **Stream**: address `http://127.0.0.1:5055`, token `evt` →
+7. In panel **3** → **Build pictures and send to BLITZ**, or **Save as NumPy…**
+   (same cube, no Stream). Status and the RAM bar are here too. In BLITZ → **Stream**: address `http://127.0.0.1:5055`, token `evt` →
    Connect, then send. BLITZ File-tab options (8-bit / Normalize / Grayscale)
    apply on Connect too. **Gzip** is a checkbox, default off (localhost).
    **Log stretch** is only available with 8-bit.

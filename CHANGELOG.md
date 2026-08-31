@@ -16,6 +16,7 @@ First stable EVT3 `.raw` → BLITZ line. **Send as** is the contract: what you s
 - **Send as** also has counts (`uint16` events/pixel/Δt) and occupancy (`uint8` binary 0/255). Internal bin is always two `uint16` planes; Send as is a view (no re-bin).
 - **Full recording** button (Esc) restores the cached full-file overview after a yellow-band rebuild. Busy overlay stays up while the restore runs (cached or re-bin).
 - **Spatial bin** (`1×1` / `2×2` / `4×4` / `8×8`) pools sensor pixels before preview and send. Counts in a block are summed (clipped to uint16). Headless: `--spatial-bin`.
+- **Save as NumPy…** writes the same cube a BLITZ send would hold (Send as, crop, Δt, filters). Headless `--export-npy` is unchanged.
 
 ### Changed
 
@@ -26,7 +27,7 @@ First stable EVT3 `.raw` → BLITZ line. **Send as** is the contract: what you s
 - Suggested Δt snaps to **1-2-5** µs (0.5 / 1 / 2 / 5 ms, …). The yellow band writes that value into the spinbox (RAM/plan only). Rebuild (O) uses it unless you typed your own. Send as shows the busy overlay before the pictures update.
 - **Frame time (Δt)** no longer re-bins the preview as you type or when the yellow band fills the 1-2-5 value. Pictures catch up on **Rebuild (O)** and send. Dropped **Use suggested** — the band already writes that Δt.
 - Overview pictures take the **full window width** (two panes side by side), with the timeline underneath. Frame time, filters, and send sit in a compact row below. Guides are **How this works** / **RAW header** (off by default) and tooltips, not walls of text.
-- Status banner and **RAM** bar sit in **Send to BLITZ** (panel 3), not under the file path / under the filters. Panel 2 stays the compact Δt and filter row.
+- Status banner and **RAM** bar sit in **Send or save** (panel 3), not under the file path / under the filters. Panel 2 stays the compact Δt and filter row.
 - **Crop (M)** sits under the timeline (after Rebuild / Full recording), not on the picture. The green rectangle stays movable; **Apply crop** slices both previews and the send. Crop-edit zoom is slightly out so handles sit in the blue margin. Dropdowns stay content-sized.
 - Temporal neighbour filter no longer re-bins when you drag the yellow band or Δt. It runs when you enable it, on Rebuild (O), and on send. 1-pixel spatial still updates live.
 - Opening a new `.raw` resets Δt, filters, Send as, crop, and File-tab options to first-open defaults.
@@ -35,6 +36,10 @@ First stable EVT3 `.raw` → BLITZ line. **Send as** is the contract: what you s
 - Default send is **states** (`uint8` 0/85/170/255). Headless `--representation states` (default); `counts` writes activity gray unless `--polarity` picks ON / OFF / signed.
 - Default send dtype for counts is `uint16`, not float32 rungs. Preview still uses discrete 0…1 rungs locally.
 - RAM estimate uses 2×uint16 for the build buffer; wire is 1 byte/pixel (states / occupancy) or 2 (counts).
+
+### Removed
+
+- **Send last pictures again** — BLITZ already re-downloads when Stream connects if a cube is ready.
 
 [Unreleased]: https://github.com/PiMaV/event-reader/compare/build-v1.0.0...HEAD
 [1.0.0]: https://github.com/PiMaV/event-reader/compare/build-0.2.0-1...build-v1.0.0

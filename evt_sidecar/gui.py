@@ -143,7 +143,7 @@ class _BinWorker(QObject):
                 log.info("spatial filtered shape=%s in %.2fs", out.shape, elapsed)
                 self.finished.emit(src, out, elapsed, self.kind)
                 return
-            if self.kind == "export":
+            if self.kind in ("export", "export_npy"):
                 if self.store is None:
                     raise RuntimeError("export bin needs a loaded store")
                 after = bin_events(self.store, self.params)
@@ -453,7 +453,8 @@ OVERVIEW_HELP = (
     "green rectangle (zoom is slightly out so the handles sit in the blue). "
     "Apply crop when it fits — mouse-up does not lock the crop. "
     "Spatial bin (2×2 / 4×4 / 8×8) pools sensor pixels when you do not "
-    "need the full resolution."
+    "need the full resolution. Panel 3 sends that cube to BLITZ or "
+    "saves it as NumPy (same bytes)."
 )
 
 
@@ -583,6 +584,7 @@ class MainWindow(QMainWindow):
         self._preview_user_zoom = False
         self._force_fit_preview = False
         self._dt_user_set = False
+        self._npy_out: Path | None = None
         self._playhead_s = 0.0
         self._stack_budget: StackBudget | None = None
         self._rate_zoom_timer = QTimer(self)
@@ -1027,7 +1029,7 @@ class MainWindow(QMainWindow):
         form.addRow("Noise filter", noise_wrap)
         s2.addLayout(form)
 
-        step3 = QGroupBox("3 — Send to BLITZ")
+        step3 = QGroupBox("3 — Send or save")
         s3 = QVBoxLayout(step3)
         s3.setContentsMargins(8, 8, 8, 8)
         self.apply_btn = QPushButton("Build pictures and send to BLITZ")
@@ -1037,12 +1039,15 @@ class MainWindow(QMainWindow):
             "then send. Green status = BLITZ downloaded the stack."
         )
         self.apply_btn.clicked.connect(self._export_to_blitz)
-        self.push_btn = QPushButton("Send last pictures again")
-        self.push_btn.setEnabled(False)
-        self.push_btn.setToolTip("Push the last cube again without re-binning.")
-        self.push_btn.clicked.connect(self._repush)
+        self.save_npy_btn = QPushButton("Save as NumPy…")
+        self.save_npy_btn.setEnabled(False)
+        self.save_npy_btn.setToolTip(
+            "Write the same cube a BLITZ send would hold (Send as, crop, "
+            "Δt, filters, 8-bit / Normalize). Does not need Stream."
+        )
+        self.save_npy_btn.clicked.connect(self._save_as_npy)
         s3.addWidget(self.apply_btn)
-        s3.addWidget(self.push_btn)
+        s3.addWidget(self.save_npy_btn)
         self.gzip_box = QCheckBox("Gzip on the wire")
         self.gzip_box.setChecked(False)
         self.gzip_box.setToolTip(
@@ -1160,6 +1165,7 @@ class MainWindow(QMainWindow):
         self.meta_label.setText("Decoding…")
         self._set_status("work", "1/3 Decoding recording…")
         self.apply_btn.setEnabled(False)
+        self.save_npy_btn.setEnabled(False)
         thread = QThread(self)
         worker = _LoadWorker(path)
         worker.moveToThread(thread)
@@ -1489,6 +1495,7 @@ class MainWindow(QMainWindow):
         ready = self._overview is not None
         if level == "block":
             self.apply_btn.setEnabled(False)
+            self.save_npy_btn.setEnabled(False)
             self.apply_btn.setText("Too big for free RAM — raise Δt or shrink range")
             self.apply_btn.setStyleSheet(
                 "QPushButton { background:#6b0000; color:#ffffff; font-weight:bold; "
@@ -1496,6 +1503,7 @@ class MainWindow(QMainWindow):
             )
             return
         self.apply_btn.setEnabled(ready)
+        self.save_npy_btn.setEnabled(ready)
         self.apply_btn.setText("Build pictures and send to BLITZ")
         if level == "yellow":
             self.apply_btn.setStyleSheet(
@@ -2392,6 +2400,7 @@ class MainWindow(QMainWindow):
             if first_full and kind == "overview":
                 self._set_playhead_s(0.0)
             self.apply_btn.setEnabled(True)
+            self.save_npy_btn.setEnabled(True)
             if kind == "overview_view":
                 dt_ms = self._overview_dt_us / 1000.0
                 hint = self._interlace_hint(arr)
@@ -2426,19 +2435,13 @@ class MainWindow(QMainWindow):
             return
 
         self._set_preview_busy(False)
-        pol = self._gui_polarity()
-        net = stack_for_send(arr, pol, self._representation())
-        net = encode_stack_for_send(
-            net,
-            eight_bit=self.eight_bit.isChecked(),
-            log_stretch=self.log_stretch.isChecked(),
-            normalize=self.normalize_box.isChecked(),
-            grayscale=False,
-        )
+        net = self._wire_cube(arr)
+        hint = self._interlace_hint(arr)
+        if kind == "export_npy":
+            self._write_npy(net, elapsed, hint)
+            return
 
         self.publisher.set_stack(net, push=True)
-        self.push_btn.setEnabled(True)
-        hint = self._interlace_hint(arr)
         if self._blitz_clients <= 0:
             self._set_status(
                 "wait",
@@ -2534,13 +2537,61 @@ class MainWindow(QMainWindow):
         self._set_status("work", "2/3 Building pictures for BLITZ…")
         self._start_bin(self._export_params(), "export")
 
-    def _repush(self) -> None:
-        self.publisher.push()
+    def _default_npy_name(self) -> str:
+        raw = Path(self.path_edit.text().strip() or "recording")
+        return f"{raw.stem}_{self._representation().value}.npy"
+
+    def _save_as_npy(self) -> None:
+        if self._store is None:
+            return
+        self._refresh_plan_label()
+        if not self._confirm_stack(self._stack_budget, preview=False):
+            return
+        raw = Path(self.path_edit.text().strip() or ".")
+        start = raw.parent if raw.suffix else Path(".")
+        suggested = start / self._default_npy_name()
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save NumPy cube",
+            str(suggested),
+            "NumPy (*.npy);;All files (*)",
+        )
+        if not path:
+            return
+        out = Path(path)
+        if out.suffix.lower() != ".npy":
+            out = out.with_suffix(".npy")
+        self._npy_out = out
+        self._set_status("work", f"Building pictures for {out.name}…")
+        self._start_bin(self._export_params(), "export_npy")
+
+    def _wire_cube(self, arr: np.ndarray) -> np.ndarray:
+        net = stack_for_send(arr, self._gui_polarity(), self._representation())
+        return encode_stack_for_send(
+            net,
+            eight_bit=self.eight_bit.isChecked(),
+            log_stretch=self.log_stretch.isChecked(),
+            normalize=self.normalize_box.isChecked(),
+            grayscale=False,
+        )
+
+    def _write_npy(self, net: np.ndarray, elapsed: float, hint: str) -> None:
+        path = self._npy_out
+        self._npy_out = None
+        if path is None:
+            self._set_status("err", "Save as NumPy: no path")
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(path, net)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            self._set_status("err", f"Could not write {path.name}")
+            return
         self._set_status(
-            "wait",
-            "Sending last pictures again…"
-            if self._blitz_clients
-            else "Waiting for BLITZ Stream — Connect in BLITZ → Stream."
+            "ok",
+            f"Wrote {path.name}  {tuple(net.shape)} {net.dtype}  "
+            f"({elapsed * 1000:.0f} ms).{hint}",
         )
 
     def _on_blitz_downloaded(self, nbytes: int) -> None:
@@ -2574,6 +2625,7 @@ class MainWindow(QMainWindow):
             )
 
     def _on_bin_failed(self, message: str) -> None:
+        self._npy_out = None
         self._set_preview_busy(False)
         self._set_status("err", "Failed")
         QMessageBox.critical(self, "Failed", message)

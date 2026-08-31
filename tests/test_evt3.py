@@ -212,6 +212,19 @@ def test_states_view_even_rungs() -> None:
     assert int(codes[0, 1, 1]) == 0
 
 
+def test_npy_save_roundtrip_matches_send_cube(tmp_path: Path) -> None:
+    planes = np.zeros((2, 3, 3, 2), dtype=np.uint16)
+    planes[0, 1, 1, 1] = 4
+    planes[1, 0, 0, 0] = 2
+    cube = stack_for_send(planes, PolarityMode.COLOR, Representation.STATES)
+    out = tmp_path / "clip_states.npy"
+    np.save(out, cube)
+    loaded = np.load(out)
+    assert loaded.dtype == cube.dtype
+    assert loaded.shape == cube.shape
+    np.testing.assert_array_equal(loaded, cube)
+
+
 def test_stack_for_network_uint8() -> None:
     from evt_sidecar.binning import stack_for_network
 
