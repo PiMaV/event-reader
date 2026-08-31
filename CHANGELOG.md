@@ -6,9 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- README is the v1.0 landing page (download, Send as, send or save).
+
 ## [1.0.0] - 2026-08-31
 
-First stable EVT3 `.raw` → BLITZ line. **Send as** is the contract: what you see is what the cube holds.
+**First fully available** EVT3 `.raw` → BLITZ line: open a recording, inspect it locally, send a cube or save NumPy. **Send as** is the contract — what you see is what the cube holds.
 
 ### Added
 
