@@ -1,9 +1,9 @@
 # Event reader backlog
 
 Not scheduled. Already in the app: yellow-band restag at the **same Δt as
-send** (no 1 ms preview floor), suggested Δt for ~150 pictures that you can
-override, even/odd warn on the local preview and on send, optional noise
-filters on **preview and send**, crop from window max.
+send**, suggested Δt you can override, even/odd warn, optional noise
+filters with **before/after** in the GUI (neighbour window = frame Δt),
+color polarity from the RAW ON/OFF bit, crop from window max.
 
 ## Open
 

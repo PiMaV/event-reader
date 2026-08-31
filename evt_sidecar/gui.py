@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from PyQt6.QtGui import (
     QDropEvent,
     QFont,
     QKeySequence,
+    QMouseEvent,
     QPainter,
     QPen,
     QShortcut,
@@ -29,6 +31,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -38,8 +41,10 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QStatusBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -52,14 +57,22 @@ from .binning import (
     AccumMode,
     BinParams,
     PolarityMode,
-    activity_preview,
+    Representation,
     bin_events,
     encode_stack_for_send,
     even_odd_row_ratio,
     event_rate_ms,
+    plan_nice_pictures,
     plan_pictures,
+    polarity_count_ceiling,
+    preview_from_on_off,
+    removed_fraction,
+    roi_event_series,
+    spatial_out_size,
+    stack_for_send,
 )
 from .evt3 import EventStore, load_evt3_raw
+from .filters import drop_isolated_pixels
 from .ram import (
     FILL_COLOR,
     NAV_WARN_FRAMES,
@@ -95,22 +108,83 @@ class _LoadWorker(QObject):
 
 
 class _BinWorker(QObject):
-    finished = pyqtSignal(object, float, str)
+    finished = pyqtSignal(object, object, float, str)
     failed = pyqtSignal(str)
 
-    def __init__(self, store: EventStore, params: BinParams, kind: str) -> None:
+    def __init__(
+        self,
+        store: EventStore | None,
+        params: BinParams,
+        kind: str,
+        stack: np.ndarray | None = None,
+    ) -> None:
         super().__init__()
         self.store = store
         self.params = params
         self.kind = kind
+        self.stack = stack
+        self.result_after: np.ndarray | None = None
+        self.mass_before: float | None = None
+        self.mass_mid: float | None = None
+        self.mass_after: float | None = None
 
     def run(self) -> None:
         try:
             t0 = time.perf_counter()
-            stack = bin_events(self.store, self.params)
+            if self.kind == "spatial":
+                if self.stack is None:
+                    raise RuntimeError("spatial filter needs a cached stack")
+                src = np.asarray(self.stack)
+                out = drop_isolated_pixels(src)
+                self.mass_mid = float(src.sum(dtype=np.float64))
+                self.mass_after = float(out.sum(dtype=np.float64))
+                self.result_after = out
+                elapsed = time.perf_counter() - t0
+                log.info("spatial filtered shape=%s in %.2fs", out.shape, elapsed)
+                self.finished.emit(src, out, elapsed, self.kind)
+                return
+            if self.kind == "export":
+                if self.store is None:
+                    raise RuntimeError("export bin needs a loaded store")
+                after = bin_events(self.store, self.params)
+                elapsed = time.perf_counter() - t0
+                log.info(
+                    "%s binned shape=%s in %.2fs",
+                    self.kind,
+                    after.shape,
+                    elapsed,
+                )
+                self.result_after = after
+                self.finished.emit(None, after, elapsed, self.kind)
+                return
+            if self.store is None:
+                raise RuntimeError("overview bin needs a loaded store")
+            before_p = replace(
+                self.params, drop_isolated=False, neighbor_dt_us=None
+            )
+            before = bin_events(self.store, before_p)
+            if self.params.neighbor_dt_us is not None:
+                mid_p = replace(self.params, drop_isolated=False)
+                mid = bin_events(self.store, mid_p)
+            else:
+                mid = before
+            if self.params.drop_isolated:
+                after = drop_isolated_pixels(mid)
+            else:
+                after = mid
+            self.result_after = after
+            self.mass_before = float(before.sum(dtype=np.float64))
+            self.mass_mid = float(mid.sum(dtype=np.float64))
+            self.mass_after = float(after.sum(dtype=np.float64))
             elapsed = time.perf_counter() - t0
-            log.info("%s binned shape=%s in %.2fs", self.kind, stack.shape, elapsed)
-            self.finished.emit(stack, elapsed, self.kind)
+            log.info(
+                "%s binned before=%s mid=%s in %.2fs",
+                self.kind,
+                before.shape,
+                mid.shape,
+                elapsed,
+            )
+            self.finished.emit(before, mid, elapsed, self.kind)
         except Exception as exc:  # noqa: BLE001
             log.exception("bin failed")
             self.failed.emit(str(exc))
@@ -132,19 +206,22 @@ _STATUS_THEME = {
 
 
 class _Led(QFrame):
-    """Full-width status banner (load / bin / BLITZ). Replaces the tiny traffic light."""
+    """Status banner (load / bin / BLITZ) in the Send panel."""
 
     def __init__(self) -> None:
         super().__init__()
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setMinimumHeight(64)
+        self.setMinimumHeight(48)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
         self.kind = "idle"
         self._cursor_overridden = False
         self._pulse_on = True
 
         col = QVBoxLayout(self)
-        col.setContentsMargins(12, 8, 12, 8)
+        col.setContentsMargins(8, 6, 8, 6)
         col.setSpacing(4)
 
         row = QHBoxLayout()
@@ -165,6 +242,7 @@ class _Led(QFrame):
             "and BLITZ Stream status."
         )
         self.label.setWordWrap(True)
+        self.label.setMaximumHeight(48)
         titles.addWidget(self.headline)
         titles.addWidget(self.label)
         row.addWidget(self.dot, alignment=Qt.AlignmentFlag.AlignTop)
@@ -278,14 +356,13 @@ class _RamBanner(QFrame):
         super().__init__()
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setMinimumHeight(92)
+        self.setMinimumHeight(56)
         col = QVBoxLayout(self)
-        col.setContentsMargins(12, 10, 12, 10)
-        col.setSpacing(6)
+        col.setContentsMargins(8, 6, 8, 6)
+        col.setSpacing(4)
         self.headline = QLabel("RAM")
         head_font = QFont(self.headline.font())
         head_font.setBold(True)
-        head_font.setPointSize(head_font.pointSize() + 4)
         self.headline.setFont(head_font)
         self.bar = _RamBar()
         self.detail = QLabel("Choose Δt to see how much memory this send needs.")
@@ -324,7 +401,7 @@ class _RamBanner(QFrame):
         self.detail.setText(
             f"{fmt_bytes(budget.wire_bytes)} on the wire  ·  "
             f"{budget.n_frames} pictures  ·  "
-            f"~{fmt_bytes(budget.build_bytes)} to build (float32)  ·  "
+            f"~{fmt_bytes(budget.build_bytes)} to bin (2×uint16 ON/OFF)  ·  "
             f"{fmt_bytes(ram.available)} free.  {notes[budget.level]}{nav}"
         )
 
@@ -350,6 +427,77 @@ def _file_preview_text(store: EventStore, n_header: int = 10, n_events: int = 8)
                 f"{int(store.t[i]):16d}  {int(store.x[i]):4d}  {int(store.y[i]):4d}  {pol}"
             )
     return "\n".join(lines)
+
+
+# Slate blue around the picture: black pixels are a measured zero, not empty UI.
+PREVIEW_VOID = (28, 52, 84)
+# Extra image-heights of void while placing the crop ROI, so edge handles
+# sit in the blue instead of on the viewport frame.
+CROP_EDIT_MARGIN = 0.12
+# Default green rectangle inset (fraction of stack size) — not full-frame.
+CROP_ROI_INSET = 0.08
+
+OVERVIEW_HELP = (
+    "Wheel or the white playhead scrubs pictures (like BLITZ). "
+    "Ctrl+wheel or right-drag zooms time. Yellow band = the range you send "
+    "(it also writes a 1-2-5 Δt). Typing Δt updates the RAM plan only. "
+    "O rebuilds that band at the Δt in panel 2 (same Δt BLITZ gets). "
+    "Esc or double-click the plot restores the coarse full-file overview. "
+    "Left = unfiltered, right = noise filters. Pan/zoom stay locked. "
+    "Yellow box on the pictures is the time-series probe (plot = event count "
+    "in that box, sum not mean). Double-click a picture to fit the full frame. "
+    "Send as is the one choice: states (red / green / yellow), "
+    "counts (Inferno), occupancy (black / white). "
+    "The cube is always one gray channel; those colours are the legend here. "
+    "Crop (M) comes after the yellow band: activity image, then move the "
+    "green rectangle (zoom is slightly out so the handles sit in the blue). "
+    "Apply crop when it fits — mouse-up does not lock the crop. "
+    "Spatial bin (2×2 / 4×4 / 8×8) pools sensor pixels when you do not "
+    "need the full resolution."
+)
+
+
+def preview_contain_ranges(
+    width: float,
+    height: float,
+    view_w: float,
+    view_h: float,
+    margin: float = 0.0,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """View ranges that show the **entire** picture (letterbox with void).
+
+    ``margin`` grows the box uniformly so crop-ROI handles sit in the blue.
+    Zoom-out stops here; the image is never cropped by the default view.
+    """
+    w = max(1.0, float(width))
+    h = max(1.0, float(height))
+    vw = max(1.0, float(view_w))
+    vh = max(1.0, float(view_h))
+    m = max(0.0, float(margin))
+    box_w = w * (1.0 + 2.0 * m)
+    box_h = h * (1.0 + 2.0 * m)
+    view_aspect = vw / vh
+    box_aspect = box_w / box_h
+    if view_aspect >= box_aspect:
+        y0 = (h - box_h) / 2.0
+        x_span = box_h * view_aspect
+        x0 = (w - x_span) / 2.0
+        return (x0, x0 + x_span), (y0, y0 + box_h)
+    x0 = (w - box_w) / 2.0
+    y_span = box_w / view_aspect
+    y0 = (h - y_span) / 2.0
+    return (x0, x0 + box_w), (y0, y0 + y_span)
+
+
+def preview_fit_height_ranges(
+    width: float,
+    height: float,
+    view_w: float,
+    view_h: float,
+    margin: float = 0.0,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Alias: default view is contain (whole frame), not height-crop."""
+    return preview_contain_ranges(width, height, view_w, view_h, margin)
 
 
 def raw_paths_from_dropped(paths: list[str | Path]) -> list[Path]:
@@ -387,7 +535,22 @@ class MainWindow(QMainWindow):
 
         self._store: EventStore | None = None
         self._overview: np.ndarray | None = None
+        self._overview_before: np.ndarray | None = None
         self._overview_full: np.ndarray | None = None
+        self._overview_full_before: np.ndarray | None = None
+        self._counts_before: np.ndarray | None = None
+        self._counts_mid: np.ndarray | None = None
+        self._counts_after: np.ndarray | None = None
+        self._counts_before_full: np.ndarray | None = None
+        self._counts_mid_full: np.ndarray | None = None
+        self._counts_after_full: np.ndarray | None = None
+        self._activity_before: np.ndarray | None = None
+        self._activity_mid: np.ndarray | None = None
+        self._activity_after: np.ndarray | None = None
+        self._mass_before: float | None = None
+        self._mass_mid: float | None = None
+        self._mass_after: float | None = None
+        self._spatial_src: np.ndarray | None = None
         self._overview_dt_us = 1
         self._overview_full_dt_us = 1
         self._overview_t0_us = 0
@@ -397,7 +560,9 @@ class MainWindow(QMainWindow):
         self._overview_full_sig: tuple | None = None
         self._showing_activity = False
         self._crop_roi: pg.RectROI | None = None
-        self._crop_roi_wanted = False
+        self._crop_box: tuple[int, int, int, int] | None = None
+        self._crop_editing = False
+        self._syncing_crop = False
         self._load_thread: QThread | None = None
         self._load_worker: _LoadWorker | None = None
         self._bin_thread: QThread | None = None
@@ -407,16 +572,35 @@ class MainWindow(QMainWindow):
         self._pending_bin: tuple[BinParams, str] | None = None
         self._blitz_clients = 0
         self._syncing_range = False
+        self._syncing_view = False
+        self._syncing_probe = False
+        self._saved_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None
+        self._event_scale_hi = 1.0
+        self._probe_roi_before: pg.ROI | None = None
+        self._probe_roi_after: pg.ROI | None = None
+        self._probe_spatial: tuple[int, int] | None = None
+        self._preview_wh: tuple[int, int] | None = None
+        self._preview_user_zoom = False
+        self._force_fit_preview = False
+        self._dt_user_set = False
         self._playhead_s = 0.0
         self._stack_budget: StackBudget | None = None
         self._rate_zoom_timer = QTimer(self)
         self._rate_zoom_timer.setSingleShot(True)
         self._rate_zoom_timer.setInterval(120)
         self._rate_zoom_timer.timeout.connect(self._refresh_rate_curve_from_view)
-        self._filter_preview_timer = QTimer(self)
-        self._filter_preview_timer.setSingleShot(True)
-        self._filter_preview_timer.setInterval(280)
-        self._filter_preview_timer.timeout.connect(self._rebuild_preview_for_filters)
+        self._view_timer = QTimer(self)
+        self._view_timer.setSingleShot(True)
+        self._view_timer.setInterval(0)
+        self._view_timer.timeout.connect(self._run_preview_view_update)
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.setInterval(0)
+        self._fit_timer.timeout.connect(self._fit_preview_full_frame)
+        self._roi_series_timer = QTimer(self)
+        self._roi_series_timer.setSingleShot(True)
+        self._roi_series_timer.setInterval(50)
+        self._roi_series_timer.timeout.connect(self._refresh_roi_series)
 
         self._bridge = _NetBridge(self)
         self._bridge.served.connect(self._on_blitz_downloaded)
@@ -437,6 +621,77 @@ class MainWindow(QMainWindow):
     def _set_status(self, kind: str, text: str) -> None:
         self.led.set_state(kind, text)
         self.statusBar().showMessage(text)
+        if kind == "work" and getattr(self, "_busy_before", None) is not None:
+            self._set_preview_busy(True, text)
+
+    def _make_preview_pane(
+        self,
+        title: str,
+        extras: list[QWidget] | None = None,
+    ) -> tuple[pg.ImageView, QWidget, QLabel]:
+        box = QWidget()
+        col = QVBoxLayout(box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(2)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(6)
+        lab = QLabel(title)
+        lab.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        title_row.addWidget(lab, stretch=1)
+        for extra in extras or []:
+            title_row.addWidget(extra)
+        wrap = QWidget()
+        grid = QGridLayout(wrap)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(0)
+        view = pg.ImageView()
+        view.setAcceptDrops(False)
+        view.ui.roiBtn.hide()
+        view.ui.menuBtn.hide()
+        view.ui.histogram.hide()
+        view.ui.roiPlot.hide()
+        view.ui.histogram.setMaximumWidth(0)
+        view.ui.roiPlot.setMaximumHeight(0)
+        view.ui.splitter.setChildrenCollapsible(True)
+        view.ui.splitter.setStretchFactor(0, 1)
+        if view.ui.splitter.count() > 1:
+            view.ui.splitter.setStretchFactor(1, 0)
+            view.ui.splitter.setCollapsible(1, True)
+        view.ui.splitter.setHandleWidth(0)
+        view.ui.splitter.setSizes([10_000, 0])
+        view.setMinimumHeight(240)
+        view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        vb = view.getView()
+        vb.setAspectLocked(True)
+        vb.setDefaultPadding(0.0)
+        vb.enableAutoRange(enable=False)
+        void = pg.mkColor(*PREVIEW_VOID)
+        view.ui.graphicsView.setBackground(void)
+        vb.setBackgroundColor(void)
+        busy = QLabel("")
+        busy.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        busy.setWordWrap(True)
+        busy.setStyleSheet(
+            "QLabel { background: rgba(18, 14, 6, 210); color: #ffe9a8; "
+            "font-weight: bold; font-size: 14px; padding: 16px; }"
+        )
+        busy.hide()
+        busy.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        grid.addWidget(view, 0, 0)
+        grid.addWidget(busy, 0, 0)
+        grid.setRowStretch(0, 1)
+        grid.setColumnStretch(0, 1)
+        busy.raise_()
+        col.addLayout(title_row)
+        col.addWidget(wrap, stretch=1)
+        return view, box, busy
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -454,45 +709,119 @@ class MainWindow(QMainWindow):
         file_row.addWidget(browse)
         layout.addLayout(file_row)
 
-        self.led = _Led()
-        layout.addWidget(self.led)
+        meta_row = QHBoxLayout()
         self.meta_label = QLabel("No file loaded.")
         self.meta_label.setWordWrap(True)
-        layout.addWidget(self.meta_label)
+        meta_row.addWidget(self.meta_label, stretch=1)
+        self.header_btn = QToolButton()
+        self.header_btn.setText("RAW header")
+        self.header_btn.setCheckable(True)
+        self.header_btn.setToolTip(
+            "First RAW header lines and a few decoded events. Hidden by "
+            "default so the pictures keep the space."
+        )
+        self.help_btn = QToolButton()
+        self.help_btn.setText("How this works")
+        self.help_btn.setCheckable(True)
+        self.help_btn.setToolTip(
+            "Short guide. Hover any control for the same detail in a tooltip."
+        )
+        meta_row.addWidget(self.header_btn)
+        meta_row.addWidget(self.help_btn)
+        layout.addLayout(meta_row)
+
         self.file_preview = QPlainTextEdit()
         self.file_preview.setReadOnly(True)
-        self.file_preview.setMaximumHeight(150)
+        self.file_preview.setMaximumHeight(110)
         self.file_preview.setPlaceholderText("RAW header and first events appear here.")
         self.file_preview.setFont(QFont("monospace", 9))
         self.file_preview.setAcceptDrops(False)
+        self.file_preview.hide()
+        self.header_btn.toggled.connect(self.file_preview.setVisible)
         layout.addWidget(self.file_preview)
 
-        step1 = QGroupBox("1 — Overview (local only, not sent to BLITZ)")
+        self.help_text = QLabel(OVERVIEW_HELP)
+        self.help_text.setWordWrap(True)
+        self.help_text.hide()
+        self.help_btn.toggled.connect(self.help_text.setVisible)
+        layout.addWidget(self.help_text)
+
+        step1 = QGroupBox("1 — Overview")
         s1 = QVBoxLayout(step1)
-        s1.addWidget(QLabel(
-            "Wheel or the white playhead scrubs pictures (like BLITZ). "
-            "Ctrl+wheel or right-drag zooms time; double-click resets to the "
-            "full file. Yellow band = the range you will send. "
-            "O rebuilds the overview for that yellow range at the Δt below "
-            "(same pictures BLITZ will get) and zooms the timeline to it. "
-            "M shows a window activity image so you can set "
-            "a crop rectangle."
-        ))
-        self.preview = pg.ImageView()
-        self.preview.setAcceptDrops(False)
-        self.preview.ui.roiBtn.hide()
-        self.preview.ui.menuBtn.hide()
-        self.preview.ui.histogram.hide()
-        self.preview.ui.roiPlot.hide()
-        self.preview.setMinimumHeight(280)
-        s1.addWidget(self.preview, stretch=1)
+        s1.setContentsMargins(8, 8, 8, 8)
+        s1.setSpacing(4)
+
+        self.activity_btn = QPushButton("Crop (M)")
+        self.activity_btn.setEnabled(False)
+        self.activity_btn.setToolTip(
+            "After the yellow band is right: one activity picture of that "
+            "window, then move the green rectangle. The view zooms out a "
+            "little so the handles sit in the blue. Mouse-up does not lock "
+            "the crop — press Apply crop when it fits."
+        )
+        self.activity_btn.clicked.connect(self._show_activity_crop)
+        self.apply_crop_btn = QPushButton("Apply crop")
+        self.apply_crop_btn.setEnabled(False)
+        self.apply_crop_btn.setToolTip(
+            "Slice both previews and the send to the green rectangle. "
+            "Drag and drop the rectangle as often as you need first."
+        )
+        self.apply_crop_btn.clicked.connect(self._apply_crop)
+        self.reset_crop_btn = QPushButton("Reset crop")
+        self.reset_crop_btn.setEnabled(False)
+        self.reset_crop_btn.setToolTip("Use the full sensor again.")
+        self.reset_crop_btn.clicked.connect(self._reset_crop)
+
+        pair = QWidget()
+        pair.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        pair_row = QHBoxLayout(pair)
+        pair_row.setContentsMargins(0, 0, 0, 0)
+        pair_row.setSpacing(8)
+        self.preview_before, before_box, self._busy_before = self._make_preview_pane(
+            "Before — unfiltered"
+        )
+        self.preview, after_box, self._busy_after = self._make_preview_pane(
+            "After — noise filters",
+        )
+        pair_row.addWidget(before_box, stretch=1)
+        pair_row.addWidget(after_box, stretch=1)
+        s1.addWidget(pair, stretch=1)
+
+        self.color_legend = QLabel(
+            "States: red = OFF · green = ON · yellow = both. Hover for more."
+        )
+        self.color_legend.setWordWrap(False)
+        self.filter_stats = QLabel("Filters off.")
+        self.filter_stats.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        legend_row = QHBoxLayout()
+        legend_row.setContentsMargins(0, 0, 0, 0)
+        legend_row.addWidget(self.color_legend, stretch=1)
+        legend_row.addWidget(self.filter_stats)
+        s1.addLayout(legend_row)
 
         self.playhead_label = QLabel("t = —")
-        s1.addWidget(self.playhead_label)
+        self.timeline_legend = QLabel("")
+        self.timeline_legend.setTextFormat(Qt.TextFormat.RichText)
+        self.timeline_legend.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.timeline_legend.setToolTip(
+            "Cyan = events in the yellow box (unfiltered). "
+            "Gold = the same box after noise filters."
+        )
+        head_row = QHBoxLayout()
+        head_row.setContentsMargins(0, 0, 0, 0)
+        head_row.addWidget(self.playhead_label, stretch=1)
+        head_row.addWidget(self.timeline_legend)
+        s1.addLayout(head_row)
 
         self.time_plot = pg.PlotWidget()
         self.time_plot.setAcceptDrops(False)
-        self.time_plot.setMinimumHeight(110)
+        self.time_plot.setMinimumHeight(100)
         self.time_plot.setMaximumHeight(140)
         self.time_plot.setLabel("bottom", "Time", units="s")
         self.time_plot.setLabel("left", "Events")
@@ -503,7 +832,9 @@ class MainWindow(QMainWindow):
         vb.enableAutoRange(axis=vb.YAxis)
         vb.disableAutoRange(axis=vb.XAxis)
         vb.sigXRangeChanged.connect(self._on_xrange_changed)
-        self.rate_curve = self.time_plot.plot(pen=pg.mkPen("#7ec8e3", width=1))
+        self.rate_curve = self.time_plot.plot(pen=pg.mkPen("#3d5a66", width=1))
+        self.roi_before_curve = self.time_plot.plot(pen=pg.mkPen("#7ec8e3", width=2))
+        self.roi_after_curve = self.time_plot.plot(pen=pg.mkPen("#ffcc33", width=2))
         self.region = pg.LinearRegionItem(
             [0.0, 1.0],
             brush=(230, 180, 40, 55),
@@ -519,40 +850,48 @@ class MainWindow(QMainWindow):
         self.playhead.setZValue(10)
         self.time_plot.addItem(self.playhead)
         self.region.sigRegionChanged.connect(self._on_region_changed)
+        self.region.sigRegionChangeFinished.connect(self._on_region_change_finished)
         self.playhead.sigPositionChanged.connect(self._on_playhead_moved)
         self.time_plot.scene().sigMouseClicked.connect(self._on_timeline_clicked)
         self.time_plot.installEventFilter(self)
         self.time_plot.viewport().installEventFilter(self)
         self.preview.sigTimeChanged.connect(self._on_preview_index)
+        self.preview_before.sigTimeChanged.connect(self._on_preview_index)
+        self._wire_preview_views()
         s1.addWidget(self.time_plot)
         ov_row = QHBoxLayout()
         self.restag_btn = QPushButton("Rebuild overview for selection (O)")
         self.restag_btn.setEnabled(False)
         self.restag_btn.setToolTip(
-            "Zoom to the yellow band and re-bin the overview at the current "
-            "Δt — the same pictures you will send to BLITZ. "
-            "The coarse full-file overview stays cached (double-click the plot)."
+            "Zoom to the yellow band and re-bin at the Δt in panel 2 — the "
+            "same pictures you will send to BLITZ. Moving the yellow band "
+            "writes a 1-2-5 Δt (~150 pictures) into the spinbox; typing Δt "
+            "updates the RAM plan only until you Rebuild or send. Full "
+            "recording restores the coarse full-file overview."
         )
         self.restag_btn.clicked.connect(self._restag_overview_for_view)
-        self.activity_btn = QPushButton("Window max / set crop (M)")
-        self.activity_btn.setEnabled(False)
-        self.activity_btn.setToolTip(
-            "One picture of all events in the yellow band. Drag the green "
-            "rectangle to crop the send (same idea as a BLITZ load ROI)."
+        self.full_rec_btn = QPushButton("Full recording (Esc)")
+        self.full_rec_btn.setEnabled(False)
+        self.full_rec_btn.setToolTip(
+            "Un-zoom the timeline and restore the cached full-file overview "
+            "(same as double-clicking the plot). Does not reload the .raw."
         )
-        self.activity_btn.clicked.connect(self._show_activity_crop)
-        self.reset_crop_btn = QPushButton("Reset crop")
-        self.reset_crop_btn.setEnabled(False)
-        self.reset_crop_btn.clicked.connect(self._reset_crop)
+        self.full_rec_btn.clicked.connect(self._reset_time_zoom)
         ov_row.addWidget(self.restag_btn)
+        ov_row.addWidget(self.full_rec_btn)
+        ov_row.addStretch(1)
         ov_row.addWidget(self.activity_btn)
+        ov_row.addWidget(self.apply_crop_btn)
         ov_row.addWidget(self.reset_crop_btn)
         s1.addLayout(ov_row)
-        layout.addWidget(step1, stretch=1)
 
-        step2 = QGroupBox("2 — Frame time for the selected range")
+        step2 = QGroupBox("2 — Frame time & filters")
         s2 = QVBoxLayout(step2)
+        s2.setContentsMargins(8, 8, 8, 8)
         form = QFormLayout()
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
         self.dt_ms = QDoubleSpinBox()
         self.dt_ms.setRange(SENSOR_DT_US / 1000.0, 1_000_000.0)
         self.dt_ms.setDecimals(3)
@@ -560,42 +899,71 @@ class MainWindow(QMainWindow):
         self.dt_ms.setValue(1.0)
         self.dt_ms.setSuffix(" ms")
         self.dt_ms.setToolTip(
-            "How long each picture integrates — preview rebuild and BLITZ send "
-            "use this same Δt. Sensor timestamps step by 1 µs (0.001 ms). "
-            "Use suggested Δt for ~150 pictures in the yellow band, or type "
-            "your own. Picture count is limited only by RAM (yellow/red below)."
+            "How long each picture integrates. Typing here updates the RAM "
+            "plan only — Rebuild (O) and send re-bin at this Δt. Moving the "
+            "yellow band writes a 1-2-5 value (~150 pictures). Sensor "
+            "timestamps step by 1 µs (0.001 ms). Picture count is limited "
+            "only by RAM (yellow/red bar in Send to BLITZ)."
         )
-        self.dt_ms.valueChanged.connect(self._refresh_plan_label)
-        self.suggest_dt_btn = QPushButton("Use suggested")
-        self.suggest_dt_btn.setEnabled(False)
-        self.suggest_dt_btn.setToolTip(
-            "Set Δt so the yellow band becomes about 150 pictures. "
-            "You can still type a finer or coarser value."
+        self.dt_ms.valueChanged.connect(self._on_dt_changed)
+        form.addRow("Frame time (Δt)", self.dt_ms)
+        self.spatial_bin = QComboBox()
+        for k, label in (
+            (1, "1×1 (full)"),
+            (2, "2×2"),
+            (4, "4×4"),
+            (8, "8×8"),
+        ):
+            self.spatial_bin.addItem(label, k)
+        self.spatial_bin.setCurrentIndex(0)
+        self.spatial_bin.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
         )
-        self.suggest_dt_btn.clicked.connect(self._apply_suggested_dt)
-        dt_wrap = QWidget()
-        dt_row = QHBoxLayout(dt_wrap)
-        dt_row.setContentsMargins(0, 0, 0, 0)
-        dt_row.addWidget(self.dt_ms)
-        dt_row.addWidget(self.suggest_dt_btn)
-        form.addRow("Frame time (Δt)", dt_wrap)
+        self.spatial_bin.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
+        self.spatial_bin.setToolTip(
+            "Pool that many sensor pixels into one before preview and send. "
+            "Use this when you do not need the full 1280×720. Counts in a "
+            "block are summed. 1×1 is the native resolution."
+        )
+        self.spatial_bin.currentIndexChanged.connect(self._on_spatial_bin_changed)
+        form.addRow("Spatial bin", self.spatial_bin)
         self.min_dt_label = QLabel(
-            "Sensor timestamps at 1 µs (relative to the start of this file, "
-            "not wall-clock). Stack size is a soft RAM limit — see the bar."
+            "Timestamps at 1 µs from the first event in this file."
         )
         self.min_dt_label.setWordWrap(True)
         form.addRow(self.min_dt_label)
-        self.polarity = QComboBox()
-        for mode in PolarityMode:
-            self.polarity.addItem(mode.value, mode)
-        self.polarity.setCurrentIndex(2)
-        self.polarity.currentIndexChanged.connect(self._on_polarity_changed)
-        form.addRow("Polarity", self.polarity)
+        self.representation = QComboBox()
+        for mode, label in (
+            (Representation.STATES, "states (ON / OFF / both)"),
+            (Representation.COUNTS, "counts (events / pixel / Δt)"),
+            (Representation.OCCUPANCY, "occupancy (fired / not)"),
+        ):
+            self.representation.addItem(label, mode)
+        self.representation.setCurrentIndex(0)
+        self.representation.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.representation.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
+        self.representation.setToolTip(
+            "What BLITZ holds — the pictures here use a matching legend. "
+            "States (default): polarity as red / green / yellow; cube is "
+            "uint8 0 / 85 / 170 / 255 (nothing / OFF / ON / both). "
+            "Counts: Inferno for how many events; cube is uint16 activity "
+            "(ON+OFF). Occupancy: black / white fired-or-not; cube is "
+            "uint8 0 or 255."
+        )
+        self.representation.currentIndexChanged.connect(self._on_send_as_changed)
+        form.addRow("Send as", self.representation)
         self.eight_bit = QCheckBox("8-bit")
         self.eight_bit.setChecked(False)
         self.eight_bit.setToolTip(
-            "Off (default): send float32 event counts to BLITZ. "
-            "On: pack to uint8 here (same idea as the BLITZ File tab)."
+            "Off (default): keep the send dtype (uint8 states, "
+            "uint16 counts, uint8 occupancy). "
+            "On: clip counts to uint8 here (same idea as the BLITZ File tab)."
         )
         self.eight_bit.toggled.connect(self._on_encode_options_changed)
         self.normalize_box = QCheckBox("Normalize")
@@ -604,12 +972,13 @@ class MainWindow(QMainWindow):
             "Per-picture min–max stretch. Same idea as the BLITZ File tab. "
             "BLITZ can still apply File-tab options again on Connect."
         )
-        self.normalize_box.toggled.connect(self._refresh_plan_label)
+        self.normalize_box.toggled.connect(self._on_encode_options_changed)
         self.grayscale_box = QCheckBox("Grayscale")
         self.grayscale_box.setChecked(True)
+        self.grayscale_box.setEnabled(False)
         self.grayscale_box.setToolTip(
-            "Event pictures are already one channel; this matches the File tab "
-            "and only changes RGB stacks."
+            "Always on: the BLITZ cube is one channel. "
+            "Colour here is the Send-as legend (not the cube)."
         )
         encode_wrap = QWidget()
         encode_row = QHBoxLayout(encode_wrap)
@@ -617,6 +986,7 @@ class MainWindow(QMainWindow):
         encode_row.addWidget(self.eight_bit)
         encode_row.addWidget(self.normalize_box)
         encode_row.addWidget(self.grayscale_box)
+        encode_row.addStretch(1)
         form.addRow("Send like File tab", encode_wrap)
         self.log_stretch = QCheckBox("Log stretch (log1p → 0…255)")
         self.log_stretch.setChecked(False)
@@ -626,62 +996,50 @@ class MainWindow(QMainWindow):
             "do not crush typical counts."
         )
         form.addRow(self.log_stretch)
+        self.log_stretch.toggled.connect(self._on_encode_options_changed)
+        self._sync_send_widgets()
         noise_wrap = QWidget()
-        noise_col = QVBoxLayout(noise_wrap)
+        noise_col = QHBoxLayout(noise_wrap)
         noise_col.setContentsMargins(0, 0, 0, 0)
-        noise_col.setSpacing(4)
+        noise_col.setSpacing(8)
         self.drop_isolated_box = QCheckBox("1-pixel spatial")
         self.drop_isolated_box.setChecked(False)
         self.drop_isolated_box.setToolTip(
             "After binning: zero pixels that have a count but all 8 neighbours "
             "are empty. Optional — a real 1-pixel event is removed too. "
-            "Updates the local preview immediately; send uses the same setting."
+            "Runs in the background (busy overlay on both pictures); "
+            "send uses the same setting."
         )
         self.drop_isolated_box.toggled.connect(self._on_filter_checkbox)
         self.neighbor_box = QCheckBox("Temporal neighbour")
         self.neighbor_box.setChecked(False)
         self.neighbor_box.setToolTip(
             "Before binning: keep an event only if a pixel in its 3×3 "
-            "neighbourhood already fired within Δt. Isolated salt-and-pepper "
-            "events drop. Updates the local preview; send uses the same setting."
+            "neighbourhood already fired within the frame Δt above. "
+            "Isolated salt-and-pepper events drop. This is expensive — "
+            "it runs when you tick the box, on Rebuild (O), and on send. "
+            "Moving the yellow band or Δt does not re-bin the preview."
         )
         self.neighbor_box.toggled.connect(self._on_neighbor_toggled)
-        self.neighbor_dt_ms = QDoubleSpinBox()
-        self.neighbor_dt_ms.setRange(SENSOR_DT_US / 1000.0, 1_000_000.0)
-        self.neighbor_dt_ms.setDecimals(3)
-        self.neighbor_dt_ms.setSingleStep(0.5)
-        self.neighbor_dt_ms.setValue(3.0)
-        self.neighbor_dt_ms.setSuffix(" ms")
-        self.neighbor_dt_ms.setEnabled(False)
-        self.neighbor_dt_ms.setToolTip(
-            "Neighbourhood time window for the temporal filter. "
-            "The preview rebuilds after a short pause while you edit."
-        )
-        self.neighbor_dt_ms.valueChanged.connect(self._on_neighbor_dt_changed)
-        nn_row = QHBoxLayout()
-        nn_row.setContentsMargins(0, 0, 0, 0)
-        nn_row.addWidget(self.neighbor_box)
-        nn_row.addWidget(self.neighbor_dt_ms)
-        nn_row.addStretch(1)
         noise_col.addWidget(self.drop_isolated_box)
-        noise_col.addLayout(nn_row)
-        form.addRow("Noise filter (optional)", noise_wrap)
+        noise_col.addWidget(self.neighbor_box)
+        noise_col.addStretch(1)
+        form.addRow("Noise filter", noise_wrap)
         s2.addLayout(form)
-        self.ram_banner = _RamBanner()
-        s2.addWidget(self.ram_banner)
-        layout.addWidget(step2)
 
-        step3 = QGroupBox("3 — Send to BLITZ (only when you click)")
+        step3 = QGroupBox("3 — Send to BLITZ")
         s3 = QVBoxLayout(step3)
-        s3.addWidget(QLabel(
-            "BLITZ does not update by itself while you scrub. Connect BLITZ "
-            "Stream first, then send. Green status = BLITZ downloaded the stack."
-        ))
+        s3.setContentsMargins(8, 8, 8, 8)
         self.apply_btn = QPushButton("Build pictures and send to BLITZ")
         self.apply_btn.setEnabled(False)
+        self.apply_btn.setToolTip(
+            "BLITZ does not update while you scrub. Connect Stream first, "
+            "then send. Green status = BLITZ downloaded the stack."
+        )
         self.apply_btn.clicked.connect(self._export_to_blitz)
-        self.push_btn = QPushButton("Send last pictures again (no rebuild)")
+        self.push_btn = QPushButton("Send last pictures again")
         self.push_btn.setEnabled(False)
+        self.push_btn.setToolTip("Push the last cube again without re-binning.")
         self.push_btn.clicked.connect(self._repush)
         s3.addWidget(self.apply_btn)
         s3.addWidget(self.push_btn)
@@ -709,16 +1067,38 @@ class MainWindow(QMainWindow):
         net_row.addWidget(QLabel("Token"))
         net_row.addWidget(self.token_edit)
         s3.addLayout(net_row)
-        layout.addWidget(step3)
+        s3.addStretch(1)
+        self.led = _Led()
+        s3.addWidget(self.led)
+        self.ram_banner = _RamBanner()
+        self.ram_banner.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        s3.addWidget(self.ram_banner)
+
+        bottom = QWidget()
+        bottom.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        bottom_row = QHBoxLayout(bottom)
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(8)
+        bottom_row.addWidget(step2, stretch=1)
+        bottom_row.addWidget(step3, stretch=1)
+
+        layout.addWidget(step1, stretch=1)
+        layout.addWidget(bottom)
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage(f"Serving {self.publisher.base_url}")
 
     def _update_connect_hint(self) -> None:
         self.connect_hint.setText(
-            f"In BLITZ → <b>Stream</b> tab: address <b>{self.publisher.base_url}</b>, "
-            f"token <b>{self.publisher.token}</b> → Connect. "
-            "Then use the button above."
+            f"BLITZ Stream: <b>{self.publisher.base_url}</b>  ·  token "
+            f"<b>{self.publisher.token}</b>"
+        )
+        self.connect_hint.setToolTip(
+            "In BLITZ → Stream: Connect with that address and token, then send."
         )
 
     def _on_encode_options_changed(self) -> None:
@@ -727,6 +1107,8 @@ class MainWindow(QMainWindow):
         if not eight:
             self.log_stretch.setChecked(False)
         self._refresh_plan_label()
+        if self._counts_mid is not None and not self._showing_activity:
+            self._refresh_filter_views()
 
     def _on_gzip_toggled(self, checked: bool) -> None:
         self.publisher.gzip_enabled = bool(checked)
@@ -773,6 +1155,7 @@ class MainWindow(QMainWindow):
     def _load_path(self, path: Path) -> None:
         if self._load_thread is not None and self._load_thread.isRunning():
             return
+        self._reset_session_controls()
         self.path_edit.setText(str(path))
         self.meta_label.setText("Decoding…")
         self._set_status("work", "1/3 Decoding recording…")
@@ -790,6 +1173,44 @@ class MainWindow(QMainWindow):
         self._load_worker = worker
         thread.start()
 
+    def _reset_session_controls(self) -> None:
+        """Restore Δt, filters, and send options to first-open defaults."""
+        self._view_timer.stop()
+        widgets = (
+            self.neighbor_box,
+            self.drop_isolated_box,
+            self.spatial_bin,
+            self.representation,
+            self.eight_bit,
+            self.normalize_box,
+            self.log_stretch,
+            self.dt_ms,
+            self.gzip_box,
+        )
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            self.neighbor_box.setChecked(False)
+            self.drop_isolated_box.setChecked(False)
+            self.spatial_bin.setCurrentIndex(0)
+            self.representation.setCurrentIndex(0)
+            self.eight_bit.setChecked(False)
+            self.normalize_box.setChecked(False)
+            self.log_stretch.setChecked(False)
+            self.log_stretch.setEnabled(False)
+            self.dt_ms.setValue(1.0)
+            self.gzip_box.setChecked(False)
+            self.publisher.gzip_enabled = False
+            self._dt_user_set = False
+            self._crop_box = None
+            self._crop_editing = False
+            self._remove_crop_roi()
+            self._sync_send_widgets()
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+        self.filter_stats.setText("Filters off.")
+
     def _clear_load_worker(self) -> None:
         if self._load_worker is not None:
             self._load_worker.deleteLater()
@@ -801,12 +1222,33 @@ class MainWindow(QMainWindow):
     def _on_loaded(self, store: EventStore) -> None:
         self._store = store
         self._overview = None
+        self._overview_before = None
         self._overview_full = None
+        self._overview_full_before = None
+        self._counts_before = None
+        self._counts_mid = None
+        self._counts_after = None
+        self._counts_before_full = None
+        self._counts_mid_full = None
+        self._counts_after_full = None
+        self._activity_before = None
+        self._activity_mid = None
+        self._activity_after = None
+        self._mass_before = None
+        self._mass_mid = None
+        self._mass_after = None
+        self._spatial_src = None
+        self._probe_spatial = None
+        self._request_full_frame()
+        self._dt_user_set = False
+        self._saved_view_range = None
+        self.filter_stats.setText("Filters off.")
         self._overview_is_detail = False
         self._overview_applied_sig = None
         self._overview_full_sig = None
         self._showing_activity = False
-        self._crop_roi_wanted = False
+        self._crop_box = None
+        self._crop_editing = False
         self._remove_crop_roi()
         dur_s = max(store.duration_us / 1_000_000.0, 0.001)
         self.meta_label.setText(
@@ -815,6 +1257,11 @@ class MainWindow(QMainWindow):
         )
         x_ms, counts = event_rate_ms(store)
         self.rate_curve.setData(x_ms / 1000.0, counts)
+        self.rate_curve.setVisible(True)
+        self.roi_before_curve.setData([], [])
+        self.roi_after_curve.setData([], [])
+        self.time_plot.setLabel("left", "Events")
+        self._set_timeline_legend("file")
         self.region.blockSignals(True)
         self.playhead.blockSignals(True)
         self.region.setBounds((0.0, dur_s))
@@ -827,9 +1274,8 @@ class MainWindow(QMainWindow):
         self._set_time_view(0.0, dur_s)
         self.file_preview.setPlainText(_file_preview_text(store))
         self.restag_btn.setEnabled(False)
-        self.activity_btn.setEnabled(False)
-        self.reset_crop_btn.setEnabled(False)
-        self.suggest_dt_btn.setEnabled(False)
+        self.full_rec_btn.setEnabled(False)
+        self._sync_crop_buttons()
         self._set_status("work", f"1/3 Building ~{OVERVIEW_PICTURES}-picture overview…")
         self._start_bin(self._overview_params(), "overview")
 
@@ -844,16 +1290,17 @@ class MainWindow(QMainWindow):
             dt_us = self._user_dt_us()
             dt_us, n, _u = plan_pictures(window_us, dt_us=dt_us)
         else:
-            dt_us, n, _u = plan_pictures(window_us, n_frames=OVERVIEW_PICTURES)
+            dt_us, n, _u = plan_nice_pictures(window_us, n_frames=OVERVIEW_PICTURES)
         return BinParams(
             dt_us=dt_us,
-            polarity=self.polarity.currentData(),
+            polarity=self._gui_polarity(),
             accum=AccumMode.COUNT,
             t0_us=t0,
             t1_us=t1,
             max_frames=n,
             drop_isolated=self.drop_isolated_box.isChecked(),
             neighbor_dt_us=self._neighbor_dt_us(),
+            spatial_bin=self._spatial_bin(),
         )
 
     def _on_load_failed(self, message: str) -> None:
@@ -912,6 +1359,7 @@ class MainWindow(QMainWindow):
             if (
                 not busy
                 and self._overview_applied_sig != self._filter_sig()
+                and not self.neighbor_box.isChecked()
             ):
                 self._rebuild_preview_for_filters()
         self._playhead_s = t_s
@@ -921,6 +1369,7 @@ class MainWindow(QMainWindow):
         if self._overview is not None and not self._showing_activity:
             idx = self._frame_at_s(t_s)
             self.preview.setCurrentIndex(idx)
+            self.preview_before.setCurrentIndex(idx)
         self._syncing_range = False
         if self._overview is not None:
             n = self._overview.shape[0]
@@ -929,6 +1378,7 @@ class MainWindow(QMainWindow):
                 f"t = {t_s:.4f} s   ·   {kind} picture {idx + 1} / {n}   "
                 f"({self._overview_dt_us / 1000.0:.2f} ms per picture)"
             )
+            self._update_filter_stats(frame=idx)
         else:
             self.playhead_label.setText(f"t = {t_s:.4f} s")
 
@@ -956,6 +1406,18 @@ class MainWindow(QMainWindow):
         self._set_playhead_s(x)
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        preview_ports = {
+            self.preview.ui.graphicsView.viewport(),
+            self.preview_before.ui.graphicsView.viewport(),
+        }
+        if (
+            obj in preview_ports
+            and event.type() == QEvent.Type.MouseButtonDblClick
+            and isinstance(event, QMouseEvent)
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._fit_picture()
+            return True
         watched = {self.time_plot, self.time_plot.viewport()}
         if obj in watched and event.type() == QEvent.Type.Wheel:
             wheel = event
@@ -984,7 +1446,7 @@ class MainWindow(QMainWindow):
         t0_s = (t0 - self._store.t_min) / 1_000_000.0
         t1_s = (t1 - self._store.t_min) / 1_000_000.0
         ram = read_ram()
-        itemsize = 1 if self.eight_bit.isChecked() else 4
+        itemsize = self._wire_itemsize()
         h, w = self._send_hw()
         budget = assess_stack(n, h, w, ram, wire_itemsize=itemsize)
         self._stack_budget = budget
@@ -996,15 +1458,24 @@ class MainWindow(QMainWindow):
         else:
             x0, y0, x1, y1 = crop
             crop_txt = f"crop {x1 - x0}×{y1 - y0} at ({x0},{y0})"
+        sb = self._spatial_bin()
+        if sb > 1:
+            crop_txt += f" · {sb}×{sb} → {w}×{h}"
         filt_txt = self._filter_brief()
-        sug_us, sug_n, _u = plan_pictures(window_us, n_frames=OVERVIEW_PICTURES)
-        self.min_dt_label.setText(
+        sug_us, sug_n, _u = plan_nice_pictures(window_us, n_frames=OVERVIEW_PICTURES)
+        short = (
+            f"{t0_s:.3f}–{t1_s:.3f} s  ·  Δt {dt_us / 1000.0:.3f} ms → {n} pics"
+            f"  ·  suggested {sug_us / 1000.0:.3f} ms ({sug_n})"
+            f"  ·  {crop_txt}"
+        )
+        self.min_dt_label.setText(short)
+        self.min_dt_label.setToolTip(
             f"Time in this file starts at 0 (first event), not the clock. "
             f"Timestamps step by {SENSOR_DT_US} µs. "
             f"Selected {t0_s:.4f}–{t1_s:.4f} s ({span_s:.3f} s). "
-            f"Δt = {dt_us / 1000.0:.3f} ms → {n} pictures (preview rebuild "
+            f"Δt = {dt_us / 1000.0:.3f} ms → {n} pictures (Rebuild (O) "
             f"and BLITZ send use this). "
-            f"Suggested for ~{OVERVIEW_PICTURES} pictures: "
+            f"Suggested (1-2-5, ~{OVERVIEW_PICTURES} pictures): "
             f"{sug_us / 1000.0:.3f} ms ({sug_n} pics). "
             f"{crop_txt}. {filt_txt}. "
             f"Yellow ≥ {fmt_bytes(int(y_b))} (1/8 RAM), "
@@ -1044,11 +1515,20 @@ class MainWindow(QMainWindow):
             return
         self._refresh_plan_label()
 
+    def _on_region_change_finished(self) -> None:
+        if self._syncing_range:
+            return
+        self._apply_suggested_dt(from_user=False)
+
     def _suggest_dt_from_overview(self) -> None:
-        self.dt_ms.blockSignals(True)
-        self.dt_ms.setValue(self._overview_dt_us / 1000.0)
-        self.dt_ms.blockSignals(False)
+        self._set_dt_ms(self._overview_dt_us / 1000.0, from_user=False)
         self._refresh_plan_label()
+
+    def _set_dt_ms(self, dt_ms: float, *, from_user: bool) -> None:
+        self._dt_user_set = from_user
+        self.dt_ms.blockSignals(True)
+        self.dt_ms.setValue(dt_ms)
+        self.dt_ms.blockSignals(False)
 
     def _user_dt_us(self) -> int:
         return max(SENSOR_DT_US, int(round(self.dt_ms.value() * 1000.0)))
@@ -1056,21 +1536,42 @@ class MainWindow(QMainWindow):
     def _neighbor_dt_us(self) -> int | None:
         if not self.neighbor_box.isChecked():
             return None
-        return max(SENSOR_DT_US, int(round(self.neighbor_dt_ms.value() * 1000.0)))
+        return self._user_dt_us()
+
+    def _spatial_bin(self) -> int:
+        data = self.spatial_bin.currentData()
+        return max(1, int(data if data is not None else 1))
+
+    def _wire_itemsize(self) -> int:
+        if self._representation() in (
+            Representation.STATES,
+            Representation.OCCUPANCY,
+        ):
+            return 1
+        if self.eight_bit.isChecked():
+            return 1
+        return 2
+
+    def _gui_polarity(self) -> PolarityMode:
+        """GUI send is activity / any-fire; ON/OFF/signed stay CLI-only."""
+        return PolarityMode.COLOR
+
+    def _representation(self) -> Representation:
+        data = self.representation.currentData()
+        return Representation.STATES if data is None else Representation(data)
+
+    def _sync_send_widgets(self) -> None:
+        self.grayscale_box.setChecked(True)
 
     def _filter_sig(self) -> tuple:
-        return (
-            bool(self.drop_isolated_box.isChecked()),
-            self._neighbor_dt_us(),
-            self.polarity.currentData(),
-        )
+        return (self._neighbor_dt_us(), self._spatial_bin())
 
     def _filter_brief(self) -> str:
         parts: list[str] = []
         if self.drop_isolated_box.isChecked():
             parts.append("1-pixel")
         if self.neighbor_box.isChecked():
-            parts.append(f"neighbour {self.neighbor_dt_ms.value():.3f} ms")
+            parts.append(f"neighbour (= Δt {self.dt_ms.value():.3f} ms)")
         return ("filters: " + ", ".join(parts)) if parts else "filters off"
 
     def _filter_status_suffix(self) -> str:
@@ -1079,18 +1580,64 @@ class MainWindow(QMainWindow):
             return ""
         return f" {brief}."
 
-    def _on_filter_checkbox(self, *_args) -> None:  # noqa: ANN001
-        self._filter_preview_timer.stop()
+    def _on_dt_changed(self, *_args) -> None:  # noqa: ANN001
+        self._dt_user_set = True
         self._refresh_plan_label()
-        self._rebuild_preview_for_filters()
 
-    def _on_neighbor_dt_changed(self, *_args) -> None:  # noqa: ANN001
+    def _on_spatial_bin_changed(self, *_args) -> None:  # noqa: ANN001
+        self._snap_crop_to_spatial()
         self._refresh_plan_label()
-        if not self.neighbor_box.isChecked():
-            return
         if self._store is None or self._overview is None:
             return
-        self._filter_preview_timer.start()
+        self._request_full_frame()
+        k = self._spatial_bin()
+        self._set_status(
+            "work",
+            f"Spatial bin {k}×{k} — updating preview…",
+        )
+        self._rebuild_preview_for_filters()
+
+    def _snap_crop_to_spatial(self) -> None:
+        """Keep a committed crop on the spatial-bin grid (preview = send)."""
+        if self._crop_box is None or self._store is None:
+            return
+        sb = self._spatial_bin()
+        if sb <= 1:
+            return
+        x0, y0, x1, y1 = self._crop_box
+        x0 = ((x0 + sb - 1) // sb) * sb
+        y0 = ((y0 + sb - 1) // sb) * sb
+        x1 = (x1 // sb) * sb
+        y1 = (y1 // sb) * sb
+        x1 = min(int(self._store.width), x1)
+        y1 = min(int(self._store.height), y1)
+        if x1 - x0 < sb or y1 - y0 < sb:
+            self._crop_box = None
+            return
+        self._crop_box = (x0, y0, x1, y1)
+
+    def _on_filter_checkbox(self, *_args) -> None:  # noqa: ANN001
+        self._refresh_plan_label()
+        if self._counts_mid is None:
+            return
+        if not self.drop_isolated_box.isChecked():
+            self._counts_after = self._counts_mid
+            self._activity_after = self._activity_mid
+            self._mass_after = self._mass_mid
+            self._set_status("work", "Updating preview…")
+            self._view_timer.start()
+            return
+        self._start_spatial()
+
+    def _start_spatial(self) -> None:
+        if self._counts_mid is None:
+            return
+        self._spatial_src = self._counts_mid
+        self._set_status("work", "Applying 1-pixel filter…")
+        if self._store is None:
+            return
+        yellow = self._overview_is_detail
+        self._start_bin(self._overview_params(yellow=yellow), "spatial")
 
     def _rebuild_preview_for_filters(self) -> None:
         if self._store is None or self._overview is None:
@@ -1102,15 +1649,406 @@ class MainWindow(QMainWindow):
             return
         yellow = self._overview_is_detail
         kind = "overview_view" if yellow else "overview"
-        self._set_status("work", f"Updating preview ({brief})…")
+        self._set_status(
+            "work",
+            f"Applying filters ({brief}) — pictures stay until this finishes…",
+        )
         self._start_bin(self._overview_params(yellow=yellow), kind)
 
-    def _apply_suggested_dt(self) -> None:
+    def _display_counts(self, arr: np.ndarray) -> np.ndarray:
+        return preview_from_on_off(
+            arr,
+            self._gui_polarity(),
+            self._representation(),
+            hi=self._event_scale_hi,
+        )
+
+    def _image_axes(self, arr: np.ndarray) -> dict[str, int]:
+        if arr.ndim == 4:
+            return {"t": 0, "y": 1, "x": 2, "c": 3}
+        return {"t": 0, "y": 1, "x": 2}
+
+    def _wire_preview_views(self) -> None:
+        vb0 = self.preview_before.getView()
+        vb1 = self.preview.getView()
+        vb0.sigRangeChanged.connect(self._on_preview_view_range)
+        vb1.sigRangeChanged.connect(self._on_preview_view_range)
+        vb0.sigRangeChangedManually.connect(self._on_preview_user_zoom)
+        vb1.sigRangeChangedManually.connect(self._on_preview_user_zoom)
+        vb0.sigResized.connect(self._on_preview_resized)
+        vb1.sigResized.connect(self._on_preview_resized)
+        self.preview_before.ui.graphicsView.viewport().installEventFilter(self)
+        self.preview.ui.graphicsView.viewport().installEventFilter(self)
+
+    def _on_preview_resized(self, *_args) -> None:  # noqa: ANN001
+        if self._syncing_view or self._preview_wh is None:
+            return
+        self._hide_preview_extras()
+        self._apply_preview_view_limits(*self._preview_wh)
+        if not self._preview_user_zoom:
+            self._fit_preview_full_frame()
+
+    def _apply_preview_view_limits(self, width: int, height: int) -> None:
+        """Zoom in freely; zoom out stops when the whole picture is visible."""
+        w = max(1.0, float(width))
+        h = max(1.0, float(height))
+        self._preview_wh = (int(width), int(height))
+        margin = CROP_EDIT_MARGIN if self._crop_editing else 0.0
+        self._syncing_view = True
+        try:
+            for view in (self.preview_before, self.preview):
+                vb = view.getView()
+                vb.setAspectLocked(True)
+                vb.setDefaultPadding(0.0)
+                vw, vh = self._preview_pixel_size(view)
+                xr, yr = preview_contain_ranges(w, h, vw, vh, margin)
+                max_x = max(w, xr[1] - xr[0])
+                max_y = max(h, yr[1] - yr[0])
+                vb.setLimits(
+                    xMin=xr[0],
+                    xMax=xr[1],
+                    yMin=yr[0],
+                    yMax=yr[1],
+                    minXRange=1.0,
+                    minYRange=1.0,
+                    maxXRange=max_x,
+                    maxYRange=max_y,
+                )
+        finally:
+            self._syncing_view = False
+
+    def _fit_preview_full_frame(self) -> None:
+        """Default view: the entire picture, letterboxed with slate blue."""
+        if self._preview_wh is None:
+            return
+        width, height = self._preview_wh
+        margin = CROP_EDIT_MARGIN if self._crop_editing else 0.0
+        self._syncing_view = True
+        try:
+            for view in (self.preview_before, self.preview):
+                vb = view.getView()
+                vw, vh = self._preview_pixel_size(view)
+                if vw < 8.0 or vh < 8.0:
+                    continue
+                xr, yr = preview_contain_ranges(
+                    width,
+                    height,
+                    vw,
+                    vh,
+                    margin=margin,
+                )
+                vb.setAspectLocked(True)
+                vb.setDefaultPadding(0.0)
+                vb.enableAutoRange(enable=False)
+                vb.setRange(xRange=xr, yRange=yr, padding=0.0)
+        finally:
+            self._syncing_view = False
+
+    def _fit_preview_to_height(self) -> None:
+        self._fit_preview_full_frame()
+
+    def _schedule_fit_preview(self) -> None:
+        """Fit again after layout (ViewBox size is often stale in the same event)."""
+        self._fit_timer.start()
+
+    def _fit_picture(self) -> None:
+        """Reset pan/zoom so the entire picture is visible."""
+        self._preview_user_zoom = False
+        self._fit_preview_full_frame()
+
+    def _on_preview_view_range(self, vb, *_args) -> None:  # noqa: ANN001
+        if self._syncing_view:
+            return
+        other = (
+            self.preview.getView()
+            if vb is self.preview_before.getView()
+            else self.preview_before.getView()
+        )
+        xr, yr = vb.viewRange()
+        self._syncing_view = True
+        try:
+            other.setRange(xRange=xr, yRange=yr, padding=0)
+        finally:
+            self._syncing_view = False
+
+    def _on_preview_user_zoom(self, *_args) -> None:  # noqa: ANN001
+        if self._syncing_view:
+            return
+        self._preview_user_zoom = True
+
+    def _capture_view_range(self) -> None:
+        vb = self.preview.getView()
+        xr, yr = vb.viewRange()
+        self._saved_view_range = (tuple(xr), tuple(yr))
+
+    def _restore_view_range(self) -> None:
+        if self._saved_view_range is None:
+            return
+        xr, yr = self._saved_view_range
+        self._syncing_view = True
+        try:
+            for view in (self.preview_before, self.preview):
+                view.getView().setRange(xRange=xr, yRange=yr, padding=0)
+        finally:
+            self._syncing_view = False
+
+    def _make_probe_roi(self, pos: list[float], size: list[float]) -> pg.ROI:
+        roi = pg.ROI(
+            pos,
+            size,
+            pen=pg.mkPen("#ffcc33", width=2),
+            hoverPen=pg.mkPen("#ffffff", width=2),
+            handlePen=pg.mkPen("#ffcc33", width=1),
+            rotatable=False,
+        )
+        roi.addScaleHandle([1, 1], [0, 0])
+        roi.setZValue(15)
+        return roi
+
+    def _ensure_probe_rois(self, width: int, height: int) -> None:
+        spatial = (int(width), int(height))
+        pos = [width * 9 / 20, height * 9 / 20]
+        size = [max(8.0, 0.1 * width), max(8.0, 0.1 * height)]
+        if self._probe_roi_before is None:
+            self._probe_roi_before = self._make_probe_roi(pos, size)
+            self._probe_roi_after = self._make_probe_roi(pos, size)
+            self.preview_before.view.addItem(self._probe_roi_before)
+            self.preview.view.addItem(self._probe_roi_after)
+            self._probe_roi_before.sigRegionChanged.connect(
+                lambda: self._on_probe_moved(self._probe_roi_before)
+            )
+            self._probe_roi_after.sigRegionChanged.connect(
+                lambda: self._on_probe_moved(self._probe_roi_after)
+            )
+            self._probe_spatial = spatial
+            self._roi_series_timer.start()
+            return
+        if self._probe_spatial != spatial:
+            self._syncing_probe = True
+            try:
+                for roi in (self._probe_roi_before, self._probe_roi_after):
+                    roi.setPos(pos, update=False)
+                    roi.setSize(size, update=True)
+            finally:
+                self._syncing_probe = False
+            self._probe_spatial = spatial
+            self._roi_series_timer.start()
+
+    def _on_probe_moved(self, src: pg.ROI) -> None:
+        if self._syncing_probe:
+            return
+        other = (
+            self._probe_roi_after
+            if src is self._probe_roi_before
+            else self._probe_roi_before
+        )
+        if other is None:
+            return
+        self._syncing_probe = True
+        try:
+            other.setPos(src.pos(), update=False)
+            other.setSize(src.size(), update=True)
+        finally:
+            self._syncing_probe = False
+        self._roi_series_timer.start()
+
+    def _set_preview_busy(self, on: bool, text: str = "") -> None:
+        for lab in (self._busy_before, self._busy_after):
+            lab.setText(text)
+            lab.setVisible(on)
+
+    def _after_stack(self) -> np.ndarray | None:
+        if self.drop_isolated_box.isChecked() and self._counts_after is not None:
+            return self._counts_after
+        return self._counts_mid
+
+    def _activity_after_stack(self) -> np.ndarray | None:
+        if self.drop_isolated_box.isChecked() and self._activity_after is not None:
+            return self._activity_after
+        return self._activity_mid
+
+    def _probe_xyxy(self, width: int, height: int) -> tuple[int, int, int, int]:
+        roi = self._probe_roi_before
+        if roi is None:
+            x0 = int(width * 9 / 20)
+            y0 = int(height * 9 / 20)
+            return (
+                x0,
+                y0,
+                x0 + max(8, int(0.1 * width)),
+                y0 + max(8, int(0.1 * height)),
+            )
+        pos = roi.pos()
+        size = roi.size()
+        x0 = int(np.floor(float(pos.x())))
+        y0 = int(np.floor(float(pos.y())))
+        x1 = int(np.ceil(float(pos.x()) + float(size.x())))
+        y1 = int(np.ceil(float(pos.y()) + float(size.y())))
+        return x0, y0, x1, y1
+
+    def _refresh_roi_series(self) -> None:
+        before = self._counts_before
+        if before is None or before.shape[0] < 1:
+            self.roi_before_curve.setData([], [])
+            self.roi_after_curve.setData([], [])
+            self.roi_after_curve.setVisible(False)
+            self.rate_curve.setVisible(True)
+            self.time_plot.setLabel("left", "Events")
+            self._set_timeline_legend("file")
+            return
+        ox, oy = 0, 0
+        h, w = int(before.shape[1]), int(before.shape[2])
+        if not self._crop_editing:
+            box = self._display_crop_xyxy(before)
+            if box is not None:
+                ox, oy = box[0], box[1]
+                w, h = box[2] - box[0], box[3] - box[1]
+        x0, y0, x1, y1 = self._probe_xyxy(w, h)
+        x0, x1 = x0 + ox, x1 + ox
+        y0, y1 = y0 + oy, y1 + oy
+        origin = self._overview_origin_s()
+        dt_s = self._overview_dt_us / 1_000_000.0
+        t = origin + np.arange(before.shape[0], dtype=np.float64) * dt_s
+        y_b = roi_event_series(before, x0, y0, x1, y1)
+        self.roi_before_curve.setData(t, y_b)
+        self.roi_before_curve.setVisible(True)
+        after = self._after_stack()
+        filters_on = (
+            self.drop_isolated_box.isChecked() or self.neighbor_box.isChecked()
+        )
+        if (
+            filters_on
+            and after is not None
+            and after.shape[0] == before.shape[0]
+        ):
+            y_a = roi_event_series(after, x0, y0, x1, y1)
+            self.roi_after_curve.setData(t, y_a)
+            self.roi_after_curve.setVisible(True)
+        else:
+            self.roi_after_curve.setData([], [])
+            self.roi_after_curve.setVisible(False)
+        self.rate_curve.setVisible(False)
+        self.time_plot.setLabel("left", "ROI events")
+        self._set_timeline_legend("roi_filtered" if filters_on else "roi")
+
+    def _set_timeline_legend(self, kind: str) -> None:
+        if kind == "file":
+            html = '<span style="color:#8aa4ad">━ file events</span>'
+        elif kind == "roi_filtered":
+            html = (
+                '<span style="color:#7ec8e3">━ ROI</span>'
+                "&nbsp;&nbsp;"
+                '<span style="color:#ffcc33">━ ROI filtered</span>'
+            )
+        else:
+            html = '<span style="color:#7ec8e3">━ ROI</span>'
+        self.timeline_legend.setText(html)
+
+    def _update_filter_stats(self, *, frame: int | None = None) -> None:
+        filters_on = (
+            self.drop_isolated_box.isChecked() or self.neighbor_box.isChecked()
+        )
+        if self._showing_activity:
+            before = self._activity_before
+            after = self._activity_after_stack()
+        else:
+            before = self._counts_before
+            after = self._after_stack()
+        if not filters_on or before is None or after is None:
+            self.filter_stats.setText("Filters off.")
+            return
+        if self._showing_activity:
+            glob = removed_fraction(before, after, frame=0)
+            self.filter_stats.setText(
+                f"Removed {glob:.0%} in this window (activity image)."
+            )
+        else:
+            if frame is None:
+                frame = self._frame_at_s(self._playhead_s)
+            pic = removed_fraction(before, after, frame=frame)
+            if (
+                self._mass_before is not None
+                and self._mass_after is not None
+                and self._mass_before > 0.0
+            ):
+                glob = max(
+                    0.0,
+                    min(
+                        1.0,
+                        (self._mass_before - self._mass_after) / self._mass_before,
+                    ),
+                )
+            else:
+                glob = pic
+            self.filter_stats.setText(
+                f"Removed {pic:.0%} in this picture · {glob:.0%} in all "
+                f"{before.shape[0]} pictures (this window)."
+            )
+
+    def _set_view_image(
+        self,
+        view: pg.ImageView,
+        arr: np.ndarray,
+        *,
+        levels: tuple[float, float] | None = None,  # noqa: ARG002
+        auto_range: bool = True,  # noqa: ARG002  (range is contain / full frame)
+    ) -> None:
+        axes = self._image_axes(arr)
+        view.setImage(arr, autoLevels=False, autoRange=False, axes=axes)
+        item = view.getImageItem()
+        item.setLevels((0.0, 1.0))
+        item.setOpts(smooth=False)
+
+    def _count_ladder_note(self) -> str:
+        rep = self._representation()
+        if rep == Representation.STATES:
+            short = "States: black none · red OFF · green ON · yellow both"
+            tip = (
+                "Polarity in this Δt: black = nothing, red = OFF, "
+                "green = ON, yellow = both. "
+                "BLITZ gets one uint8 channel: 0 / 85 / 170 / 255."
+            )
+        elif rep == Representation.OCCUPANCY:
+            short = "Occupancy: black = nothing · white = fired"
+            tip = (
+                "Binary who-fired. Preview is black / white. "
+                "BLITZ gets uint8 0 or 255 (any polarity)."
+            )
+        else:
+            n = max(1, int(round(float(self._event_scale_hi))))
+            short = f"Counts: Inferno  ·  rungs 0…{n} events/pixel  ·  BLITZ gets uint16"
+            tip = (
+                f"How many events (ON+OFF) in this Δt. Inferno: dark = none, "
+                f"bright = many. Rungs 0…{n} (p99 of unfiltered). "
+                "BLITZ receives uint16 activity. Its LUT is separate."
+            )
+        self.color_legend.setToolTip(tip)
+        return short
+
+    def _refresh_filter_views(self) -> None:
+        if self._counts_before is None or self._counts_mid is None:
+            return
+        after = self._after_stack()
+        if after is None:
+            after = self._counts_mid
+        pol = self._gui_polarity()
+        self._event_scale_hi = float(polarity_count_ceiling(self._counts_before, pol))
+        self._overview_before = self._display_counts(self._counts_before)
+        self._overview = self._display_counts(after)
+        self._overview_applied_sig = self._filter_sig()
+        self.color_legend.setText(self._count_ladder_note())
+        if not self._showing_activity:
+            self._show_overview_stack()
+        self._update_filter_stats()
+        self._refresh_roi_series()
+
+    def _apply_suggested_dt(self, *, from_user: bool = False) -> None:
         if self._store is None:
             return
         t0, t1 = self._selected_window_us()
-        dt_us, _n, _u = plan_pictures(t1 - t0, n_frames=OVERVIEW_PICTURES)
-        self.dt_ms.setValue(dt_us / 1000.0)
+        dt_us, _n, _u = plan_nice_pictures(t1 - t0, n_frames=OVERVIEW_PICTURES)
+        self._set_dt_ms(dt_us / 1000.0, from_user=from_user)
+        self._refresh_plan_label()
 
     def _interlace_hint(self, arr: np.ndarray) -> str:
         ratio = even_odd_row_ratio(arr)
@@ -1133,7 +2071,7 @@ class MainWindow(QMainWindow):
         t0, t1 = self._selected_window_us()
         dt_us, n, _u = plan_pictures(t1 - t0, dt_us=self._user_dt_us())
         ram = read_ram()
-        itemsize = 1 if self.eight_bit.isChecked() else 4
+        itemsize = self._wire_itemsize()
         return assess_stack(
             n,
             self._store.height,
@@ -1193,8 +2131,14 @@ class MainWindow(QMainWindow):
         self._pending_bin = None
         self._bin_busy_kind = kind
         self._bin_inflight_params = params
+        self._set_preview_busy(True, self.led.label.text() or "Working…")
         thread = QThread(self)
-        worker = _BinWorker(self._store, params, kind)
+        worker = _BinWorker(
+            self._store,
+            params,
+            kind,
+            stack=self._spatial_src if kind == "spatial" else None,
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_binned)
@@ -1218,91 +2162,233 @@ class MainWindow(QMainWindow):
         self._pending_bin = None
         if pending is not None:
             self._start_bin(*pending)
+        else:
+            self._set_preview_busy(False)
 
     def _hide_preview_extras(self) -> None:
-        self.preview.ui.roiPlot.hide()
-        self.preview.ui.histogram.hide()
+        for view in (self.preview, self.preview_before):
+            view.ui.roiPlot.hide()
+            view.ui.histogram.hide()
+            view.ui.roiPlot.setMaximumHeight(0)
+            view.ui.histogram.setMaximumWidth(0)
+            view.ui.splitter.setSizes([10_000, 0])
+            view.ui.splitter.setHandleWidth(0)
+
+    def _request_full_frame(self) -> None:
+        """Next picture update fills the pane (full frame), ignoring leftover zoom."""
+        self._force_fit_preview = True
+        self._preview_user_zoom = False
+        self._preview_wh = None
+
+    def _keep_preview_view(self, width: int, height: int) -> bool:
+        if self._force_fit_preview:
+            self._force_fit_preview = False
+            self._preview_user_zoom = False
+            return False
+        return (
+            self._preview_user_zoom
+            and self._preview_wh == (width, height)
+        )
+
+    def _preview_pixel_size(self, view: pg.ImageView) -> tuple[float, float]:
+        port = view.ui.graphicsView.viewport()
+        return max(1.0, float(port.width())), max(1.0, float(port.height()))
 
     def _show_overview_stack(self) -> None:
         if self._overview is None:
             return
+        before = (
+            self._overview_before
+            if self._overview_before is not None
+            else self._overview
+        )
         self._showing_activity = False
         self._syncing_range = True
-        self.preview.setImage(
-            self._overview, autoLevels=True, axes={"t": 0, "y": 1, "x": 2}
-        )
+        before = self._slice_preview(before)
+        ov = self._slice_preview(self._overview)
+        h, w = int(before.shape[1]), int(before.shape[2])
+        keep_view = self._keep_preview_view(w, h)
+        if keep_view:
+            self._capture_view_range()
+        self._set_view_image(self.preview_before, before, auto_range=not keep_view)
+        self._set_view_image(self.preview, ov, auto_range=not keep_view)
         self._hide_preview_extras()
+        self._apply_preview_view_limits(w, h)
+        self._ensure_probe_rois(w, h)
+        if keep_view:
+            self._restore_view_range()
+        else:
+            self._fit_preview_full_frame()
+            self._schedule_fit_preview()
         idx = self._frame_at_s(self._playhead_s)
         self.preview.setCurrentIndex(idx)
+        self.preview_before.setCurrentIndex(idx)
         self._syncing_range = False
-        if self._crop_roi_wanted:
-            self._ensure_crop_roi(show=True)
+        if self._crop_editing:
+            self._ensure_crop_roi(show=True, width=w, height=h)
+        else:
+            self._ensure_crop_roi(show=False, width=w, height=h)
 
-    def _on_binned(self, stack: object, elapsed: float, kind: str) -> None:
-        arr = np.asarray(stack)
-        params = self._bin_inflight_params
-        if kind == "activity":
-            disp, lo, hi, n_pos = activity_preview(arr)
-            self._showing_activity = True
-            self._syncing_range = True
-            self.preview.setImage(
-                disp, autoLevels=False, axes={"t": 0, "y": 1, "x": 2}
+    def _show_activity_pair(self) -> None:
+        if self._activity_before is None or self._activity_mid is None:
+            return
+        after = self._activity_after_stack()
+        if after is None:
+            after = self._activity_mid
+        pol = self._gui_polarity()
+        rep = self._representation()
+        hi = float(polarity_count_ceiling(self._activity_before, pol))
+        self._event_scale_hi = hi
+        disp_b = preview_from_on_off(self._activity_before, pol, rep, hi=hi)
+        disp_a = preview_from_on_off(after, pol, rep, hi=hi)
+        disp_b = self._slice_preview(disp_b)
+        disp_a = self._slice_preview(disp_a)
+        self.color_legend.setText(self._count_ladder_note())
+        n_pos_b = int(np.count_nonzero(np.abs(disp_b) > 0))
+        n_pos = int(np.count_nonzero(np.abs(disp_a) > 0))
+        h, w = int(disp_b.shape[1]), int(disp_b.shape[2])
+        keep_view = self._keep_preview_view(w, h)
+        if keep_view:
+            self._capture_view_range()
+        self._showing_activity = True
+        self._syncing_range = True
+        self._set_view_image(
+            self.preview_before, disp_b, auto_range=not keep_view
+        )
+        self._set_view_image(
+            self.preview, disp_a, auto_range=not keep_view
+        )
+        self._hide_preview_extras()
+        self._apply_preview_view_limits(w, h)
+        self._ensure_probe_rois(w, h)
+        if keep_view:
+            self._restore_view_range()
+        else:
+            self._fit_preview_full_frame()
+            self._schedule_fit_preview()
+        self._syncing_range = False
+        if self._crop_editing:
+            self._ensure_crop_roi(show=True, width=w, height=h)
+        else:
+            self._ensure_crop_roi(show=False, width=w, height=h)
+        self._update_filter_stats(frame=0)
+        if n_pos == 0 and n_pos_b == 0:
+            self._set_status(
+                "wait",
+                "Window max is empty — no events in the yellow band. "
+                "Widen the band, then press M again.",
             )
-            self.preview.getImageItem().setLevels((lo, hi))
-            self._hide_preview_extras()
-            self._syncing_range = False
-            self._ensure_crop_roi(show=True)
-            if n_pos == 0:
-                self._set_status(
-                    "wait",
-                    "Window max is empty — no events in the yellow band. "
-                    "Widen the band, then press M again.",
+        else:
+            if self._crop_editing:
+                extra = (
+                    "Move the green rectangle — mouse-up does not lock it. "
+                    "Handles sit in the blue margin. Apply crop when it fits. "
                 )
+            elif self._crop_box is not None:
+                extra = "Crop (M) to change the crop. "
             else:
-                self._set_status(
-                    "ok",
-                    f"Window max ({n_pos:,} lit pixels, log counts)."
-                    f"{self._filter_status_suffix()} "
-                    "Drag the green rectangle to crop before send. "
-                    "Scrub the timeline to return to the overview.",
-                )
-            self._refresh_plan_label()
+                extra = "After the yellow band is right, Crop (M) to draw a crop. "
+            self._set_status(
+                "ok",
+                f"Window max ({n_pos:,} lit pixels after filters, "
+                f"{n_pos_b:,} before)."
+                f"{self._filter_status_suffix()} "
+                "Left unfiltered, right filtered. "
+                + extra
+                + "Scrub the timeline to return to the overview.",
+            )
+        self._refresh_plan_label()
+
+    def _adopt_worker_masses(self, kind: str) -> None:
+        worker = self._bin_worker
+        if worker is None:
+            return
+        if kind == "spatial":
+            if worker.mass_after is not None:
+                self._mass_after = worker.mass_after
+            if worker.mass_mid is not None:
+                self._mass_mid = worker.mass_mid
+            return
+        if worker.mass_before is not None:
+            self._mass_before = worker.mass_before
+        if worker.mass_mid is not None:
+            self._mass_mid = worker.mass_mid
+        if worker.mass_after is not None:
+            self._mass_after = worker.mass_after
+
+    def _on_binned(
+        self, before: object, after: object, elapsed: float, kind: str
+    ) -> None:
+        arr = np.asarray(after)
+        params = self._bin_inflight_params
+        result_after = (
+            self._bin_worker.result_after
+            if self._bin_worker is not None
+            and self._bin_worker.result_after is not None
+            else arr
+        )
+        self._adopt_worker_masses(kind)
+        if kind == "spatial":
+            self._counts_after = arr
+            if not self._overview_is_detail:
+                self._counts_after_full = arr
+            if self._activity_mid is not None:
+                self._activity_after = drop_isolated_pixels(self._activity_mid)
+            self._refresh_filter_views()
+            if self._showing_activity:
+                self._show_activity_pair()
+            self._set_preview_busy(False)
+            self._set_status(
+                "ok",
+                "1-pixel filter applied."
+                f"{self._filter_status_suffix()} "
+                "Plot: cyan = ROI unfiltered, gold = ROI filtered.",
+            )
+            return
+        if kind == "activity":
+            if before is None:
+                self._activity_before = arr
+                self._activity_mid = arr
+            else:
+                self._activity_before = np.asarray(before)
+                self._activity_mid = arr
+            self._activity_after = result_after
+            self._show_activity_pair()
+            self._set_preview_busy(False)
             return
 
-        net = encode_stack_for_send(
-            arr,
-            eight_bit=self.eight_bit.isChecked(),
-            log_stretch=self.log_stretch.isChecked(),
-            normalize=self.normalize_box.isChecked(),
-            grayscale=self.grayscale_box.isChecked(),
-        )
         if kind in ("overview", "overview_view"):
             first_full = self._overview_full is None
             t0 = int(self._store.t_min) if self._store is not None else 0
             dt = params.dt_us if params is not None else self._overview_dt_us
             if params is not None and params.t0_us is not None:
                 t0 = int(params.t0_us)
-            self._overview = net
+            raw_before = np.asarray(before) if before is not None else arr
+            self._counts_before = raw_before
+            self._counts_mid = arr
+            self._counts_after = result_after
             self._overview_dt_us = dt
             self._overview_t0_us = t0
             if kind == "overview":
-                self._overview_full = net
+                self._counts_before_full = raw_before
+                self._counts_mid_full = arr
+                self._counts_after_full = result_after
                 self._overview_full_dt_us = dt
                 self._overview_full_t0_us = t0
                 self._overview_is_detail = False
             else:
                 self._overview_is_detail = True
-            self._overview_applied_sig = self._filter_sig()
+            self._refresh_filter_views()
             if kind == "overview":
-                self._overview_full_sig = self._overview_applied_sig
-            n = net.shape[0]
+                self._overview_full = self._overview
+                self._overview_full_before = self._overview_before
+                self._overview_full_sig = self._filter_sig()
+            n = int(self._overview.shape[0]) if self._overview is not None else 0
             self.restag_btn.setEnabled(True)
-            self.activity_btn.setEnabled(True)
-            self.reset_crop_btn.setEnabled(True)
-            self.suggest_dt_btn.setEnabled(True)
+            self.full_rec_btn.setEnabled(True)
+            self._sync_crop_buttons()
             if first_full and kind == "overview":
                 self._suggest_dt_from_overview()
-            self._show_overview_stack()
             if first_full and kind == "overview":
                 self._set_playhead_s(0.0)
             self.apply_btn.setEnabled(True)
@@ -1314,6 +2400,9 @@ class MainWindow(QMainWindow):
                     f"Preview ready ({n} pictures, {dt_ms:.3f} ms each) — "
                     f"same Δt as a BLITZ send.{self._filter_status_suffix()}"
                     f"{hint} "
+                    "Left unfiltered, right filtered. "
+                    "The plot is the yellow-box ROI (cyan unfiltered, "
+                    "gold filtered). "
                     "Scrub here to inspect; send when it looks right.",
                 )
             else:
@@ -1321,11 +2410,31 @@ class MainWindow(QMainWindow):
                     "ok",
                     f"Overview ready ({n} pictures)."
                     f"{self._filter_status_suffix()} "
+                    "Left unfiltered, right filtered. "
+                    "The plot is the yellow-box ROI (cyan unfiltered, "
+                    "gold filtered). "
                     "Scrub the timeline, set the yellow start/end, choose Δt, "
                     "then send to BLITZ.",
                 )
             self._refresh_plan_label()
+            self._set_preview_busy(False)
+            if (
+                self._neighbor_dt_us() is not None
+                and (params is None or params.neighbor_dt_us is None)
+            ):
+                self._rebuild_preview_for_filters()
             return
+
+        self._set_preview_busy(False)
+        pol = self._gui_polarity()
+        net = stack_for_send(arr, pol, self._representation())
+        net = encode_stack_for_send(
+            net,
+            eight_bit=self.eight_bit.isChecked(),
+            log_stretch=self.log_stretch.isChecked(),
+            normalize=self.normalize_box.isChecked(),
+            grayscale=False,
+        )
 
         self.publisher.set_stack(net, push=True)
         self.push_btn.setEnabled(True)
@@ -1343,37 +2452,53 @@ class MainWindow(QMainWindow):
         )
 
     def _crop_xyxy(self) -> tuple[int, int, int, int] | None:
-        if (
-            self._store is None
-            or not self._crop_roi_wanted
-            or self._crop_roi is None
-            or not self._crop_roi.isVisible()
-        ):
+        """Crop in sensor pixels: live ROI while editing, else committed box."""
+        if self._crop_editing:
+            src = (
+                self._activity_before
+                if self._showing_activity
+                else self._counts_before
+            )
+            if src is not None:
+                return self._sensor_box_from_roi(
+                    int(src.shape[2]), int(src.shape[1])
+                )
+        return self._crop_box
+
+    def _display_crop_xyxy(
+        self, arr: np.ndarray
+    ) -> tuple[int, int, int, int] | None:
+        """Crop in the current stack's pixel coords, or None while editing."""
+        if self._crop_editing or self._crop_box is None:
             return None
-        w, h = int(self._store.width), int(self._store.height)
-        pos = self._crop_roi.pos()
-        size = self._crop_roi.size()
-        x0 = int(np.floor(float(pos.x())))
-        y0 = int(np.floor(float(pos.y())))
-        x1 = int(np.ceil(float(pos.x()) + float(size.x())))
-        y1 = int(np.ceil(float(pos.y()) + float(size.y())))
+        sb = self._spatial_bin()
+        x0, y0, x1, y1 = self._crop_box
+        x0, y0, x1, y1 = x0 // sb, y0 // sb, x1 // sb, y1 // sb
+        h, w = int(arr.shape[1]), int(arr.shape[2])
         x0 = max(0, min(w, x0))
         x1 = max(0, min(w, x1))
         y0 = max(0, min(h, y0))
         y1 = max(0, min(h, y1))
         if x1 - x0 < 1 or y1 - y0 < 1:
             return None
-        if x0 <= 1 and y0 <= 1 and x1 >= w - 1 and y1 >= h - 1:
-            return None
         return x0, y0, x1, y1
+
+    def _slice_preview(self, arr: np.ndarray) -> np.ndarray:
+        box = self._display_crop_xyxy(arr)
+        if box is None:
+            return arr
+        x0, y0, x1, y1 = box
+        return arr[:, y0:y1, x0:x1, ...]
 
     def _send_hw(self) -> tuple[int, int]:
         assert self._store is not None
         crop = self._crop_xyxy()
         if crop is None:
-            return int(self._store.height), int(self._store.width)
-        x0, y0, x1, y1 = crop
-        return y1 - y0, x1 - x0
+            h, w = int(self._store.height), int(self._store.width)
+        else:
+            x0, y0, x1, y1 = crop
+            h, w = y1 - y0, x1 - x0
+        return spatial_out_size(h, w, self._spatial_bin())
 
     def _export_params(self) -> BinParams:
         assert self._store is not None
@@ -1386,7 +2511,7 @@ class MainWindow(QMainWindow):
             x0, y0, x1, y1 = crop
         return BinParams(
             dt_us=dt_us,
-            polarity=self.polarity.currentData(),
+            polarity=self._gui_polarity(),
             accum=AccumMode.COUNT,
             t0_us=t0,
             t1_us=t0 + n * dt_us,
@@ -1397,6 +2522,7 @@ class MainWindow(QMainWindow):
             y1=y1,
             drop_isolated=self.drop_isolated_box.isChecked(),
             neighbor_dt_us=self._neighbor_dt_us(),
+            spatial_bin=self._spatial_bin(),
         )
 
     def _export_to_blitz(self) -> None:
@@ -1448,6 +2574,7 @@ class MainWindow(QMainWindow):
             )
 
     def _on_bin_failed(self, message: str) -> None:
+        self._set_preview_busy(False)
         self._set_status("err", "Failed")
         QMessageBox.critical(self, "Failed", message)
 
@@ -1460,12 +2587,18 @@ class MainWindow(QMainWindow):
     def _install_shortcuts(self) -> None:
         sc_o = QShortcut(QKeySequence("O"), self)
         sc_o.activated.connect(self._shortcut_restag)
+        sc_esc = QShortcut(QKeySequence("Escape"), self)
+        sc_esc.activated.connect(self._shortcut_full_recording)
         sc_m = QShortcut(QKeySequence("M"), self)
         sc_m.activated.connect(self._shortcut_activity)
 
     def _shortcut_restag(self) -> None:
         if self._shortcut_ok():
             self._restag_overview_for_view()
+
+    def _shortcut_full_recording(self) -> None:
+        if self._shortcut_ok():
+            self._reset_time_zoom()
 
     def _shortcut_activity(self) -> None:
         if self._shortcut_ok():
@@ -1478,6 +2611,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_rate_curve_from_view(self) -> None:
         if self._store is None:
+            return
+        if self._counts_before is not None:
             return
         t0, t1 = self._visible_window_us()
         x_ms, counts = event_rate_ms(self._store, t0_us=t0, t1_us=t1)
@@ -1524,18 +2659,44 @@ class MainWindow(QMainWindow):
             return
         dur = self._duration_s()
         self._set_time_view(0.0, dur)
-        if (
-            self._overview_full is not None
+        if not self._overview_is_detail:
+            self._set_playhead_s(self._playhead_s)
+            return
+        self._set_status("work", "Restoring full recording…")
+        QTimer.singleShot(0, self._restore_full_recording)
+
+    def _restore_full_recording(self) -> None:
+        if self._store is None:
+            self._set_preview_busy(False)
+            return
+        cache_ok = (
+            self._counts_before_full is not None
+            and self._counts_mid_full is not None
             and self._overview_full_sig == self._filter_sig()
-        ):
-            self._overview = self._overview_full
+        )
+        if cache_ok:
+            self._counts_before = self._counts_before_full
+            self._counts_mid = self._counts_mid_full
+            if (
+                self.drop_isolated_box.isChecked()
+                and self._counts_after_full is not None
+            ):
+                self._counts_after = self._counts_after_full
+            else:
+                self._counts_after = self._counts_mid_full
             self._overview_dt_us = self._overview_full_dt_us
             self._overview_t0_us = self._overview_full_t0_us
             self._overview_is_detail = False
             self._overview_applied_sig = self._overview_full_sig
-            self._show_overview_stack()
-        elif self._store is not None:
+            self._showing_activity = False
+            self._request_full_frame()
+            self._refresh_filter_views()
+            self._set_preview_busy(False)
+            self._set_status("ok", "Full recording.")
+        else:
             self._overview_is_detail = False
+            self._showing_activity = False
+            self._request_full_frame()
             self._set_status(
                 "work",
                 f"Rebuilding full-file overview ({self._filter_brief()})…",
@@ -1546,8 +2707,16 @@ class MainWindow(QMainWindow):
     def _restag_overview_for_view(self) -> None:
         if self._store is None or self._overview is None:
             return
+        if not self._dt_user_set:
+            self._apply_suggested_dt(from_user=False)
         if not self._confirm_stack(self._preview_budget(), preview=True):
             return
+        self._showing_activity = False
+        self._crop_editing = False
+        if self._crop_roi is not None:
+            self._crop_roi.setVisible(False)
+        self._sync_crop_buttons()
+        self._request_full_frame()
         x0, x1 = self._region_range_s()
         self._set_time_view(x0, x1)
         if self._playhead_s < x0 or self._playhead_s > x1:
@@ -1560,18 +2729,46 @@ class MainWindow(QMainWindow):
         )
         self._start_bin(self._overview_params(yellow=True), "overview_view")
 
-    def _on_polarity_changed(self, *_args) -> None:  # noqa: ANN001
-        if self._store is None or self._overview is None:
+    def _on_send_as_changed(self, *_args) -> None:  # noqa: ANN001
+        self._sync_send_widgets()
+        self._refresh_plan_label()
+        if self._store is None or self._counts_before is None:
             return
-        if self._overview_is_detail:
-            self._restag_overview_for_view()
-        else:
-            self._set_status("work", "Rebuilding overview for this polarity…")
-            self._start_bin(self._overview_params(yellow=False), "overview")
+        self._set_status("work", "Updating preview (send as)…")
+        self._view_timer.start()
+
+    def _run_preview_view_update(self) -> None:
+        try:
+            self._refresh_filter_views()
+            if self._showing_activity:
+                self._show_activity_pair()
+            self._set_status("ok", "Preview updated.")
+        finally:
+            busy = (
+                self._bin_thread is not None and self._bin_thread.isRunning()
+            )
+            if not busy:
+                self._set_preview_busy(False)
 
     def _on_neighbor_toggled(self, checked: bool) -> None:
-        self.neighbor_dt_ms.setEnabled(bool(checked))
-        self._on_filter_checkbox()
+        self._refresh_plan_label()
+        if self._store is None or self._overview is None:
+            return
+        if not checked and self._counts_before is not None:
+            self._counts_mid = self._counts_before
+            self._mass_mid = self._mass_before
+            if self._activity_before is not None:
+                self._activity_mid = self._activity_before
+            if self.drop_isolated_box.isChecked():
+                self._start_spatial()
+                return
+            self._counts_after = self._counts_mid
+            self._activity_after = self._activity_mid
+            self._mass_after = self._mass_mid
+            self._set_status("work", "Updating preview…")
+            self._view_timer.start()
+            return
+        self._rebuild_preview_for_filters()
 
     def _activity_params(self) -> BinParams:
         assert self._store is not None
@@ -1579,29 +2776,62 @@ class MainWindow(QMainWindow):
         window = max(1, t1 - t0)
         return BinParams(
             dt_us=window,
-            polarity=self.polarity.currentData(),
+            polarity=self._gui_polarity(),
             accum=AccumMode.COUNT,
             t0_us=t0,
             t1_us=t1,
             max_frames=1,
             drop_isolated=self.drop_isolated_box.isChecked(),
             neighbor_dt_us=self._neighbor_dt_us(),
+            spatial_bin=self._spatial_bin(),
         )
+
+    def _sync_crop_buttons(self) -> None:
+        ready = self._overview is not None
+        self.activity_btn.setEnabled(ready)
+        self.reset_crop_btn.setEnabled(ready)
+        self.apply_crop_btn.setEnabled(ready and self._crop_editing)
 
     def _show_activity_crop(self) -> None:
         if self._store is None or self._overview is None:
             return
+        self._crop_editing = True
+        self._request_full_frame()
+        self._sync_crop_buttons()
+        exp_h, exp_w = spatial_out_size(
+            int(self._store.height), int(self._store.width), self._spatial_bin()
+        )
+        if (
+            self._activity_before is not None
+            and self._activity_mid is not None
+            and self._activity_before.shape[1:3] == (exp_h, exp_w)
+        ):
+            self._show_activity_pair()
+            return
         self._set_status("work", "Building window activity image…")
         self._start_bin(self._activity_params(), "activity")
 
-    def _ensure_crop_roi(self, *, show: bool) -> None:
+    def _inset_roi_size(self, width: int, height: int) -> tuple[int, int, int, int]:
+        """Return (x, y, w, h) for a default inset rectangle in stack pixels."""
+        w, h = max(1, int(width)), max(1, int(height))
+        mx = min(max(8, int(round(CROP_ROI_INSET * w))), max(0, w // 4))
+        my = min(max(8, int(round(CROP_ROI_INSET * h))), max(0, h // 4))
+        if w - 2 * mx < 1:
+            mx = 0
+        if h - 2 * my < 1:
+            my = 0
+        return mx, my, max(1, w - 2 * mx), max(1, h - 2 * my)
+
+    def _ensure_crop_roi(self, *, show: bool, width: int, height: int) -> None:
         if self._store is None:
             return
-        w, h = int(self._store.width), int(self._store.height)
+        w, h = max(1, int(width)), max(1, int(height))
+        fresh = False
         if self._crop_roi is None:
+            ix, iy, iw, ih = self._inset_roi_size(w, h)
             self._crop_roi = pg.RectROI(
-                [0, 0],
-                [w, h],
+                [ix, iy],
+                [iw, ih],
                 pen=pg.mkPen("#32cd32", width=2),
                 hoverPen=pg.mkPen("#7cfc00", width=2),
                 rotatable=False,
@@ -1609,23 +2839,107 @@ class MainWindow(QMainWindow):
             )
             self.preview.view.addItem(self._crop_roi)
             self._crop_roi.sigRegionChangeFinished.connect(self._on_crop_roi_finished)
-        self._crop_roi_wanted = show
-        self._crop_roi.setVisible(show)
-        if show:
+            fresh = True
+        if not show:
+            self._crop_roi.setVisible(False)
+            return
+        if not fresh and self._crop_roi.isVisible():
             self._crop_roi.setZValue(20)
+            return
+        sb = self._spatial_bin()
+        self._syncing_crop = True
+        self._crop_roi.blockSignals(True)
+        try:
+            if self._crop_box is None:
+                ix, iy, iw, ih = self._inset_roi_size(w, h)
+                self._crop_roi.setPos((ix, iy), update=False)
+                self._crop_roi.setSize((iw, ih), update=True)
+            else:
+                x0, y0, x1, y1 = self._crop_box
+                dx0, dy0 = x0 // sb, y0 // sb
+                dx1, dy1 = min(w, x1 // sb), min(h, y1 // sb)
+                dw, dh = max(1, dx1 - dx0), max(1, dy1 - dy0)
+                self._crop_roi.setPos((dx0, dy0), update=False)
+                self._crop_roi.setSize((dw, dh), update=True)
+            self._crop_roi.setVisible(True)
+            self._crop_roi.setZValue(20)
+        finally:
+            self._crop_roi.blockSignals(False)
+            self._syncing_crop = False
+
+    def _sensor_box_from_roi(
+        self, stack_w: int, stack_h: int
+    ) -> tuple[int, int, int, int] | None:
+        if self._crop_roi is None or self._store is None:
+            return None
+        pos = self._crop_roi.pos()
+        size = self._crop_roi.size()
+        x0 = int(np.floor(float(pos.x())))
+        y0 = int(np.floor(float(pos.y())))
+        x1 = int(np.ceil(float(pos.x()) + float(size.x())))
+        y1 = int(np.ceil(float(pos.y()) + float(size.y())))
+        x0 = max(0, min(stack_w, x0))
+        x1 = max(0, min(stack_w, x1))
+        y0 = max(0, min(stack_h, y0))
+        y1 = max(0, min(stack_h, y1))
+        if x1 - x0 < 1 or y1 - y0 < 1:
+            return None
+        if x0 <= 0 and y0 <= 0 and x1 >= stack_w and y1 >= stack_h:
+            return None
+        sb = self._spatial_bin()
+        sx0, sy0 = x0 * sb, y0 * sb
+        sx1 = min(int(self._store.width), x1 * sb)
+        sy1 = min(int(self._store.height), y1 * sb)
+        if sx1 - sx0 < 1 or sy1 - sy0 < 1:
+            return None
+        return sx0, sy0, sx1, sy1
 
     def _on_crop_roi_finished(self) -> None:
+        if self._syncing_crop or not self._crop_editing:
+            return
         self._refresh_plan_label()
 
-    def _reset_crop(self) -> None:
-        self._crop_roi_wanted = False
-        if self._crop_roi is not None and self._store is not None:
-            self._crop_roi.setPos((0, 0), update=False)
-            self._crop_roi.setSize(
-                (int(self._store.width), int(self._store.height)), update=True
-            )
-            self._crop_roi.setVisible(False)
+    def _apply_crop(self) -> None:
+        if not self._crop_editing or self._store is None:
+            return
+        src = (
+            self._activity_before if self._showing_activity else self._counts_before
+        )
+        if src is None:
+            return
+        sh, sw = int(src.shape[1]), int(src.shape[2])
+        self._crop_box = self._sensor_box_from_roi(sw, sh)
+        self._crop_editing = False
+        self._request_full_frame()
+        self._sync_crop_buttons()
+        if self._showing_activity:
+            self._show_activity_pair()
+        else:
+            self._show_overview_stack()
         self._refresh_plan_label()
+        if self._crop_box is None:
+            self._set_status("ok", "Crop is the full sensor.")
+        else:
+            x0, y0, x1, y1 = self._crop_box
+            oh, ow = self._send_hw()
+            self._set_status(
+                "ok",
+                f"Crop applied: {x1 - x0}×{y1 - y0} sensor → {ow}×{oh} send.",
+            )
+
+    def _reset_crop(self) -> None:
+        self._crop_box = None
+        self._crop_editing = False
+        self._request_full_frame()
+        if self._crop_roi is not None:
+            self._crop_roi.setVisible(False)
+        self._sync_crop_buttons()
+        if self._showing_activity:
+            self._show_activity_pair()
+        elif self._overview is not None:
+            self._show_overview_stack()
+        self._refresh_plan_label()
+        self._set_status("ok", "Crop reset — full sensor.")
 
     def _remove_crop_roi(self) -> None:
         if self._crop_roi is None:

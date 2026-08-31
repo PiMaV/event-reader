@@ -55,7 +55,7 @@ def test_banner_theme_is_loud() -> None:
 
 
 def test_escalate_to_red_when_build_is_tight() -> None:
-    # uint8 well under 1/8 of 64 GB, but float32 (~4×) exceeds 90% of a small free pool
+    # uint8 well under 1/8 of 64 GB, but 2×uint16 build (~4×) exceeds 90% of a small free pool
     ram = RamSnapshot(total=64 * 1024**3, available=700 * 1024**2)
     budget = assess_stack(200, 720, 1280, ram, wire_itemsize=1)
     assert budget.fraction_of_total < 1 / 8

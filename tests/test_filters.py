@@ -29,6 +29,29 @@ def test_drop_isolated_signed_and_stack() -> None:
     assert out[1, 0, 1] == 1.0
 
 
+def test_drop_isolated_on_off_planes() -> None:
+    stack = np.zeros((1, 5, 5, 2), dtype=np.uint16)
+    stack[0, 2, 2, 1] = 4
+    stack[0, 0, 0, 0] = 1
+    stack[0, 0, 1, 0] = 2
+    out = drop_isolated_pixels(stack)
+    assert out.dtype == np.uint16
+    assert out[0, 2, 2].sum() == 0
+    assert out[0, 0, 0, 0] == 1
+    assert out[0, 0, 1, 0] == 2
+
+
+def test_drop_isolated_rgb() -> None:
+    stack = np.zeros((1, 5, 5, 3), dtype=np.float32)
+    stack[0, 2, 2, 1] = 4.0
+    stack[0, 0, 0, 0] = 1.0
+    stack[0, 0, 1, 0] = 2.0
+    out = drop_isolated_pixels(stack)
+    assert out[0, 2, 2].sum() == 0.0
+    assert out[0, 0, 0, 0] == 1.0
+    assert out[0, 0, 1, 0] == 2.0
+
+
 def test_neighbor_keeps_second_of_pair() -> None:
     # Isolated first event at (2,2); second at neighbour (3,2) 200 µs later.
     t = np.array([1000, 1200, 50_000], dtype=np.int64)

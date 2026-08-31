@@ -41,15 +41,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--polarity",
-        choices=["on", "off", "both", "signed"],
-        default="both",
-        help="Polarity mode (with --export-npy)",
+        choices=["on", "off", "both", "signed", "color"],
+        default="color",
+        help="Headless only: polarity for counts/occupancy export "
+        "(on / off / both / signed / color). Ignored for --representation "
+        "states. The GUI always sends activity / any-fire.",
+    )
+    parser.add_argument(
+        "--representation",
+        choices=["states", "counts", "occupancy"],
+        default="states",
+        help="BLITZ cube: uint8 states 0/85/170/255 (default), uint16 counts, or uint8 binary occupancy.",
     )
     parser.add_argument(
         "--max-frames",
         type=int,
         default=0,
         help="Optional hard picture cap (0 = none; RAM warnings are GUI-only)",
+    )
+    parser.add_argument(
+        "--spatial-bin",
+        type=int,
+        default=1,
+        choices=(1, 2, 4, 8),
+        help="Pool that many sensor pixels into one (with --export-npy)",
     )
     args = parser.parse_args(argv)
 
@@ -79,7 +94,13 @@ def main(argv: list[str] | None = None) -> int:
 def _export_headless(args: argparse.Namespace) -> int:
     import numpy as np
 
-    from .binning import BinParams, PolarityMode, bin_events
+    from .binning import (
+        BinParams,
+        PolarityMode,
+        Representation,
+        bin_events,
+        stack_for_send,
+    )
     from .evt3 import load_evt3_raw
 
     if args.raw is None:
@@ -89,10 +110,15 @@ def _export_headless(args: argparse.Namespace) -> int:
     cap = args.max_frames if args.max_frames > 0 else None
     params = BinParams(
         dt_us=max(1, int(round(args.dt_ms * 1000.0))),
-        polarity=PolarityMode(args.polarity),
         max_frames=cap,
+        spatial_bin=int(args.spatial_bin),
     )
-    stack = bin_events(store, params)
+    planes = bin_events(store, params)
+    stack = stack_for_send(
+        planes,
+        PolarityMode(args.polarity),
+        Representation(args.representation),
+    )
     out: Path = args.export_npy
     out.parent.mkdir(parents=True, exist_ok=True)
     np.save(out, stack)

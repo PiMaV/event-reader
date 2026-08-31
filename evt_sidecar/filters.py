@@ -12,36 +12,125 @@ from numba import njit
 def drop_isolated_pixels(stack: np.ndarray) -> np.ndarray:
     """Zero pixels that are non-zero while all 8 neighbours are zero.
 
-    Works on (H, W) or (T, H, W). Signed counts use abs() so an isolated
-    OFF-only pixel is removed too.
+    Works on (H, W), (T, H, W), ON/OFF (T, H, W, 2), or RGB (T, H, W, 3).
+    Signed counts and multi-channel use abs() / channel-max so an isolated
+    OFF-only pixel is removed too. Preserves the input dtype.
+
+    Call from a worker thread for full overview stacks — a
+    150×720×1280×2 volume must not run on the Qt GUI thread.
     """
-    arr = np.array(stack, dtype=np.float32, copy=True)
+    orig = np.asarray(stack)
+    orig_dtype = orig.dtype
+    arr = np.array(orig, dtype=np.float32, copy=True)
     squeeze = False
     if arr.ndim == 2:
         arr = arr[None, ...]
         squeeze = True
-    if arr.ndim != 3:
-        raise ValueError(f"expected (H, W) or (T, H, W), got shape {arr.shape}")
-
-    abs_a = np.abs(arr)
-    padded = np.pad(abs_a, ((0, 0), (1, 1), (1, 1)), mode="constant")
-    neigh = np.maximum.reduce(
-        [
-            padded[:, 0:-2, 0:-2],
-            padded[:, 0:-2, 1:-1],
-            padded[:, 0:-2, 2:],
-            padded[:, 1:-1, 0:-2],
-            padded[:, 1:-1, 2:],
-            padded[:, 2:, 0:-2],
-            padded[:, 2:, 1:-1],
-            padded[:, 2:, 2:],
-        ]
-    )
-    isolated = (abs_a > 0) & (neigh == 0)
-    arr[isolated] = 0.0
+    if arr.ndim == 4:
+        if arr.shape[-1] not in (2, 3):
+            raise ValueError(
+                f"expected last-axis 2 (ON/OFF) or 3 (RGB), got shape {arr.shape}"
+            )
+        _zero_isolated_n4(arr)
+    elif arr.ndim == 3:
+        _zero_isolated_n3(arr)
+    else:
+        raise ValueError(
+            f"expected (H, W), (T, H, W), (T, H, W, 2), or (T, H, W, 3), "
+            f"got shape {arr.shape}"
+        )
     if squeeze:
-        return arr[0]
-    return arr
+        arr = arr[0]
+    if orig_dtype == np.float32:
+        return arr
+    return arr.astype(orig_dtype, copy=False)
+
+
+@njit(cache=True)
+def _zero_isolated_n3(arr):
+    """In-place: zero isolated pixels in (T, H, W)."""
+    t_n, height, width = arr.shape
+    iso = np.zeros((t_n, height, width), dtype=np.uint8)
+    for t in range(t_n):
+        for y in range(height):
+            for x in range(width):
+                energy = arr[t, y, x]
+                if energy < 0.0:
+                    energy = -energy
+                if energy <= 0.0:
+                    continue
+                found = False
+                y0 = 0 if y == 0 else y - 1
+                y1 = height if y >= height - 1 else y + 2
+                x0 = 0 if x == 0 else x - 1
+                x1 = width if x >= width - 1 else x + 2
+                for yy in range(y0, y1):
+                    for xx in range(x0, x1):
+                        if yy == y and xx == x:
+                            continue
+                        neigh = arr[t, yy, xx]
+                        if neigh < 0.0:
+                            neigh = -neigh
+                        if neigh > 0.0:
+                            found = True
+                            break
+                    if found:
+                        break
+                if not found:
+                    iso[t, y, x] = 1
+    for t in range(t_n):
+        for y in range(height):
+            for x in range(width):
+                if iso[t, y, x]:
+                    arr[t, y, x] = 0.0
+
+
+@njit(cache=True)
+def _zero_isolated_n4(arr):
+    """In-place: zero isolated pixels in (T, H, W, C) using channel-max."""
+    t_n, height, width, n_c = arr.shape
+    iso = np.zeros((t_n, height, width), dtype=np.uint8)
+    for t in range(t_n):
+        for y in range(height):
+            for x in range(width):
+                energy = 0.0
+                for c in range(n_c):
+                    val = arr[t, y, x, c]
+                    if val < 0.0:
+                        val = -val
+                    if val > energy:
+                        energy = val
+                if energy <= 0.0:
+                    continue
+                found = False
+                y0 = 0 if y == 0 else y - 1
+                y1 = height if y >= height - 1 else y + 2
+                x0 = 0 if x == 0 else x - 1
+                x1 = width if x >= width - 1 else x + 2
+                for yy in range(y0, y1):
+                    for xx in range(x0, x1):
+                        if yy == y and xx == x:
+                            continue
+                        neigh = 0.0
+                        for c in range(n_c):
+                            val = arr[t, yy, xx, c]
+                            if val < 0.0:
+                                val = -val
+                            if val > neigh:
+                                neigh = val
+                        if neigh > 0.0:
+                            found = True
+                            break
+                    if found:
+                        break
+                if not found:
+                    iso[t, y, x] = 1
+    for t in range(t_n):
+        for y in range(height):
+            for x in range(width):
+                if iso[t, y, x]:
+                    for c in range(n_c):
+                        arr[t, y, x, c] = 0.0
 
 
 def neighbor_keep_mask(

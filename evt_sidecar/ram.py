@@ -6,9 +6,9 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
-# Default wire is float32 event counts; 8-bit send uses 1 byte/px
-WIRE_BYTES_PER_PIXEL = 4
-BUILD_BYTES_PER_PIXEL = 4
+# Internal bin is 2×uint16 ON/OFF planes. Wire depends on the send view.
+WIRE_BYTES_PER_PIXEL = 2
+BUILD_BYTES_PER_PIXEL = 4  # 2 channels × uint16
 
 # Fractions of *installed* RAM (MemTotal / ullTotalPhys)
 YELLOW_FRAC = 1 / 8
@@ -144,20 +144,22 @@ def assess_stack(
     width: int,
     ram: RamSnapshot | None = None,
     *,
-    wire_itemsize: int = 4,
+    wire_itemsize: int = 2,
+    build_itemsize: int | None = None,
 ) -> StackBudget:
     """
-    Colour the planned stack against installed RAM (default float32 = 4 bytes/px).
+    Colour the planned stack against installed RAM (default uint16 = 2 bytes/px).
 
     Yellow / red use the user's fractions of *total* RAM (stable).
     ``block`` if the wire stack itself would not fit in *available* RAM.
-    If the float32 build buffer is tight on free RAM, escalate to red (confirm).
+    If the ON/OFF uint16 build buffer is tight on free RAM, escalate to red.
     """
     ram = ram if ram is not None else read_ram()
     n = max(1, int(n_frames))
     item = max(1, int(wire_itemsize))
+    build_item = BUILD_BYTES_PER_PIXEL if build_itemsize is None else max(1, int(build_itemsize))
     wire = payload_bytes(n, height, width, item)
-    build = payload_bytes(n, height, width, BUILD_BYTES_PER_PIXEL)
+    build = payload_bytes(n, height, width, build_item)
     frac = wire / ram.total if ram.total > 0 else 0.0
     if ram.available > 0 and wire > WIRE_AVAILABLE_FRAC * ram.available:
         level: RamLevel = "block"

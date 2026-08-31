@@ -144,5 +144,7 @@ jobs:
             2. Open a recording, scrub the timeline, set Δt, then **Build pictures and send to BLITZ**.
             3. In BLITZ → Stream: `http://127.0.0.1:5055`, token `evt` → Connect.
 
-            Default payload is float32 event counts. Optional 8-bit / Normalize / Grayscale
-            match the BLITZ File tab. Gzip is off unless you check it in the reader.
+            Default payload is **states**: one uint8 channel 0 / 85 / 170 / 255
+            (nothing / OFF / ON / both). Counts are uint16 activity; occupancy
+            is uint8 binary. Optional 8-bit / Normalize match the BLITZ File tab.
+            Gzip is off unless you check it in the reader.
