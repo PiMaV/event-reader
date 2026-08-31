@@ -41,5 +41,9 @@ First stable EVT3 `.raw` → BLITZ line. **Send as** is the contract: what you s
 
 - **Send last pictures again** — BLITZ already re-downloads when Stream connects if a cube is ready.
 
+### Fixed
+
+- CI test jobs install Qt runtime libraries (`libegl1`, …) so pyqtgraph can import on GitHub runners.
+
 [Unreleased]: https://github.com/PiMaV/event-reader/compare/build-v1.0.0...HEAD
 [1.0.0]: https://github.com/PiMaV/event-reader/compare/build-0.2.0-1...build-v1.0.0

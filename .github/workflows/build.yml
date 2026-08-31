@@ -16,6 +16,10 @@ jobs:
           python-version: "3.12"
       - name: Install uv
         run: pip install uv
+      - name: Qt runtime libs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libglx-mesa0 libxcb-cursor0
       - name: Test
         run: uv sync --group dev && uv run pytest -q
 
