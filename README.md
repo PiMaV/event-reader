@@ -1,10 +1,25 @@
 # Event reader
 
-**v1.0** — first fully available EVT3 `.raw` → [BLITZ](https://github.com/PiMaV/BLITZ) line.
+[![Release](https://img.shields.io/github/v/release/PiMaV/event-reader)](https://github.com/PiMaV/event-reader/releases/latest)
+[![License](https://img.shields.io/github/license/PiMaV/event-reader)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)]()
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)]()
+
+> **v1.0** — first fully available EVT3 `.raw` → [BLITZ](https://github.com/PiMaV/BLITZ) line.
+
+![Event reader GUI](GUI.png)
 
 Open **event-camera recordings** (Prophesee / IDS **EVT3** `.raw`), inspect them as pictures, then send a dense stack over the same Network contract as **WOLKE** (Socket.IO + HTTP). No Metavision / MDK. Not part of the BLITZ Flatpak or EXE.
 
 A later live / multi-cam streamer will be **FUNKE**. This tool is archive → stack.
+
+## WETTER Framework
+
+Event reader is the event-camera archive path into **BLITZ** (same Network contract as **WOLKE**). The imaging pipeline is:
+
+`Raw Data → DAMPF → KEIM → WOLKE → BLITZ`
+
+Overview and module links: **[wetter.mess.engineering](https://wetter.mess.engineering)**
 
 ```mermaid
 flowchart TD
@@ -59,7 +74,7 @@ One-file binaries (no Python; about 140 MB, Qt + NumPy + Numba):
 - **Windows:** `EventReader.exe`
 - **Ubuntu / Linux:** `EventReader`
 
-from [GitHub Releases](https://github.com/PiMaV/event-reader/releases) — start at **[1.0.0](https://github.com/PiMaV/event-reader/releases/tag/build-v1.0.0)**.
+from [GitHub Releases](https://github.com/PiMaV/event-reader/releases) — start at **[1.0.1](https://github.com/PiMaV/event-reader/releases/tag/build-v1.0.1)**.
 
 Run the binary (optional path to a `.raw`). On Windows a console window stays open for logs.
 
@@ -125,7 +140,7 @@ uv run pyinstaller EventReader.spec --noconfirm --clean
 
 On Ubuntu: `sudo apt-get install -y libgl1 libglx-mesa0 libxcb-cursor0 libegl1` (or `./scripts/build.sh`).
 
-GitHub Actions **Build Event reader** (`workflow_dispatch`, or a `build*` tag such as `build-v1.0.0`) publishes `EventReader.exe` and `EventReader` on the Release.
+GitHub Actions **Build Event reader** (`workflow_dispatch`, or a `build*` tag such as `build-v1.0.1`) publishes `EventReader.exe` and `EventReader` on the Release.
 
 ## Later
 

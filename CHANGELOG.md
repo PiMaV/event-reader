@@ -6,9 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-31
+
 ### Changed
 
-- README is the v1.0 landing page (download, Send as, send or save).
+- README uses the suite header (badges, WETTER pipeline) and the GUI screenshot on the first page.
 
 ## [1.0.0] - 2026-08-31
 
@@ -49,5 +51,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - CI test jobs install Qt runtime libraries (`libegl1`, …) so pyqtgraph can import on GitHub runners.
 
-[Unreleased]: https://github.com/PiMaV/event-reader/compare/build-v1.0.0...HEAD
+[Unreleased]: https://github.com/PiMaV/event-reader/compare/build-v1.0.1...HEAD
+[1.0.1]: https://github.com/PiMaV/event-reader/compare/build-v1.0.0...build-v1.0.1
 [1.0.0]: https://github.com/PiMaV/event-reader/compare/build-0.2.0-1...build-v1.0.0
