@@ -9,13 +9,13 @@
 
 ![Event reader GUI](GUI.png)
 
-Open **event-camera recordings** (Prophesee / IDS **EVT3** `.raw`), inspect them as pictures, then send a dense stack over the same Network contract as **WOLKE** (Socket.IO + HTTP). No Metavision / MDK. Not part of the BLITZ Flatpak or EXE.
+Open **event-camera recordings** (Prophesee / IDS **EVT3** `.raw`), inspect them as pictures, then send a dense stack over the **WETTER Viewer Contract** (same Socket.IO + HTTP as **WOLKE**). No Metavision / MDK. Not part of the BLITZ Flatpak or EXE. **BLITZ** and **DONNER** are both clients of that hub — dual 2D/3D view without Viewer↔Viewer sockets.
 
 A later live / multi-cam streamer will be **FUNKE**. This tool is archive → stack.
 
 ## WETTER Framework
 
-Event reader is the event-camera archive path into **BLITZ** (same Network contract as **WOLKE**). The imaging pipeline is:
+Event reader is the event-camera archive path into **BLITZ** and **DONNER** (hub role of the Viewer Contract). The imaging pipeline is:
 
 `Raw Data → DAMPF → KEIM → WOLKE → BLITZ`
 
@@ -30,7 +30,7 @@ flowchart TD
   restag -.-> fullRec[Full recording]
   fullRec -.-> fullOv
   filt --> crop[Crop plus spatial bin]
-  crop --> out[Send to BLITZ or save NumPy]
+  crop --> out[Send to BLITZ or DONNER or save NumPy]
 ```
 
 ## What’s in 1.0
@@ -54,7 +54,7 @@ flowchart TD
   states["States: uint8 0 85 170 255"]
   activity["Counts: uint16 ON+OFF"]
   occ["Occupancy: uint8 binary 0/255"]
-  out["BLITZ Stream or .npy"]
+  out["BLITZ or DONNER Stream or .npy"]
 
   raw --> bin --> off
   bin --> on
@@ -78,7 +78,7 @@ from [GitHub Releases](https://github.com/PiMaV/event-reader/releases) — start
 
 Run the binary (optional path to a `.raw`). On Windows a console window stays open for logs.
 
-## Use with BLITZ
+## Use with BLITZ or DONNER
 
 Nothing is sent until you click **Build pictures and send to BLITZ**. Status and RAM live in panel **3 — Send or save**.
 
@@ -88,7 +88,8 @@ Nothing is sent until you click **Build pictures and send to BLITZ**. Status and
 4. Drag the **yellow band** to the send range. That writes a 1-2-5 **Δt** (~150 pictures). Typing Δt updates the RAM plan only; **Rebuild (O)** and send re-bin.
 5. **Crop (M)** after the band: move the green rectangle, **Apply crop**. **Reset crop** returns to the full sensor.
 6. Panel **2**: **Δt**, **spatial bin**, **Send as**, optional 8-bit / Normalize, optional noise filters. Neighbour filter runs on tick, Rebuild, and send — not while you drag the band.
-7. Panel **3**: **send to BLITZ**, or **Save as NumPy…**. In BLITZ → **Stream**: `http://127.0.0.1:5055`, token `evt` → Connect.
+7. Panel **3**: **send to BLITZ**, or **Save as NumPy…**. In BLITZ → **Stream**, or DONNER Source → Count → **Stream**: `http://127.0.0.1:5055`, token `evt` → Connect. DONNER wants **Send as counts** (`uint16` activity).
+8. After a send, **playhead sync**: scrubbing in BLITZ (or DONNER) moves the white timeline here to that stack frame; scrubbing the playhead inside the last-sent window pushes the frame index back to connected viewers.
 
 Black pixels are a measured zero. The plot is **event count in the yellow box** (cyan unfiltered, gold filtered). Even/odd row imbalance is reported in the status bar (sensor readout, not the decoder).
 
@@ -142,8 +143,14 @@ On Ubuntu: `sudo apt-get install -y libgl1 libglx-mesa0 libxcb-cursor0 libegl1` 
 
 GitHub Actions **Build Event reader** (`workflow_dispatch`, or a `build*` tag such as `build-v1.0.1`) publishes `EventReader.exe` and `EventReader` on the Release.
 
-## Later
+## Later / parked
 
-See [`BACKLOG.md`](BACKLOG.md). Open item: optional deinterlace after a known sample.
+See suite parking lot
+[`../WETTER/TODO.MD`](../WETTER/TODO.MD) (2026-09 Viewer Contract follow-ups):
+DONNER Streamer UI for local QA, Open-in/ROI handoffs, WOLKE selection
+parity. Event reader playhead ↔ BLITZ `viewer_index` is in.
+
+Also [`BACKLOG.md`](BACKLOG.md) if present. Open item: optional deinterlace
+after a known sample.
 
 License: [GPL-3.0-or-later](LICENSE).

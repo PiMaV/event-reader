@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- CORS on the `.npy` HTTP GET (`Access-Control-Allow-Origin` echoes the browser Origin, plus OPTIONS and `Access-Control-Allow-Private-Network`) so DONNER can fetch the cube from another origin, including `https://lab.ole.icu` → loopback.
+- Hub playhead relay: on `viewer_index`, rebroadcast `send_file_message` with `index` to other connected viewers (skip emitter) so BLITZ and DONNER can dual-scrub one stack.
+- Event reader timeline follows BLITZ/DONNER `viewer_index` (maps last-sent stack frame → playhead). Scrubbing the white playhead inside that window pushes `index` back to connected viewers.
+
+### Changed
+
+- Stream viewers: **BLITZ or DONNER**. DONNER uses the same WOLKE contract; **Send as counts** is the cube that matches its LUT.
+
 ## [1.0.1] - 2026-08-31
 
 ### Changed

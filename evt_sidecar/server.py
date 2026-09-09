@@ -1,8 +1,9 @@
-"""Minimal WOLKE-compatible Socket.IO + HTTP .npy server for BLITZ.
+"""Minimal WETTER Viewer Contract Socket.IO + HTTP .npy server for BLITZ and DONNER.
 
-Contract: WOLKE/BLITZ_Receiver_Contract.md
-  - Socket.IO: emit send_file_message {file_name}
+Contract: WOLKE/WETTER_Viewer_Contract.md (legacy alias BLITZ_Receiver_Contract.md)
+  - Socket.IO: emit send_file_message {file_name[, index]}
   - HTTP GET /{token}?filename=... → .npy body
+  - viewer_index from a client is rebroadcast as index seek to other clients
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import numpy as np
 from flask import Flask, abort, request
 from flask_socketio import SocketIO
 
-from .npy_http import npy_response
+from .npy_http import apply_cors, npy_response
 
 log = logging.getLogger("evt_sidecar.server")
 
@@ -24,7 +25,7 @@ STACK_NAME = "stack.npy"
 
 
 class StackPublisher:
-    """Holds the latest frame stack and pushes it to connected BLITZ clients."""
+    """Holds the latest frame stack and pushes it to connected viewers."""
 
     def __init__(
         self,
@@ -57,7 +58,7 @@ class StackPublisher:
             return self._stack is not None
 
     def set_stack(self, stack: np.ndarray, push: bool = True) -> None:
-        """Replace served stack; optionally notify BLITZ to re-download."""
+        """Replace served stack; optionally notify viewers to re-download."""
         arr = np.ascontiguousarray(stack)
         with self._lock:
             self._stack = arr
@@ -67,9 +68,18 @@ class StackPublisher:
             self.push()
 
     def push(self) -> None:
-        """Emit send_file_message so BLITZ downloads the current stack."""
+        """Emit send_file_message so viewers download the current stack."""
         log.info("push %s", STACK_NAME)
         self._sio.emit("send_file_message", {"file_name": STACK_NAME})
+
+    def push_index(self, index: int, *, skip_sid: str | None = None) -> None:
+        """Broadcast playhead seek for the current stack (no cube bytes)."""
+        payload = {"file_name": STACK_NAME, "index": int(index)}
+        log.info("push index %s", index)
+        if skip_sid:
+            self._sio.emit("send_file_message", payload, skip_sid=skip_sid)
+        else:
+            self._sio.emit("send_file_message", payload)
 
     def start_background(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -93,6 +103,18 @@ class StackPublisher:
         app = self._app
         sio = self._sio
         publisher = self
+
+        @app.after_request
+        def add_cors(resp):
+            return apply_cors(
+                resp,
+                origin=request.headers.get("Origin"),
+                request_headers=request.headers.get("Access-Control-Request-Headers"),
+            )
+
+        @app.route("/<tok>", methods=["OPTIONS"])
+        def options_file(tok: str):  # noqa: ARG001
+            return ("", 204)
 
         @app.get("/<tok>")
         def get_file(tok: str):
@@ -131,7 +153,7 @@ class StackPublisher:
         @sio.on("connect")
         def on_connect():
             publisher._clients += 1
-            log.info("BLITZ client connected")
+            log.info("viewer client connected")
             sio.emit("Connected successfully")
             if publisher.on_client_count is not None:
                 publisher.on_client_count(publisher._clients)
@@ -143,12 +165,17 @@ class StackPublisher:
         @sio.on("disconnect")
         def on_disconnect():
             publisher._clients = max(0, publisher._clients - 1)
-            log.info("BLITZ client disconnected")
+            log.info("viewer client disconnected")
             if publisher.on_client_count is not None:
                 publisher.on_client_count(publisher._clients)
 
         @sio.on("viewer_index")
         def on_viewer_index(data):
             idx = data.get("index") if isinstance(data, dict) else None
-            if isinstance(idx, int) and publisher.on_viewer_index:
+            if not isinstance(idx, int):
+                return
+            if publisher.on_viewer_index:
                 publisher.on_viewer_index(idx)
+            # Hub-and-spoke: relay playhead to other viewers (skip emitter).
+            sid = getattr(request, "sid", None)
+            publisher.push_index(idx, skip_sid=sid)

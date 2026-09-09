@@ -83,6 +83,7 @@ from .ram import (
     fmt_bytes,
     read_ram,
 )
+from .playhead_sync import playhead_s_to_stack_index, stack_index_to_playhead_s
 from .server import DEFAULT_TOKEN, StackPublisher
 
 log = logging.getLogger("evt_sidecar.gui")
@@ -193,6 +194,7 @@ class _BinWorker(QObject):
 class _NetBridge(QObject):
     served = pyqtSignal(int)
     clients = pyqtSignal(int)
+    viewer_index = pyqtSignal(int)
 
 
 _STATUS_THEME = {
@@ -575,6 +577,10 @@ class MainWindow(QMainWindow):
         self._syncing_range = False
         self._syncing_view = False
         self._syncing_probe = False
+        self._syncing_viewer_index = False
+        self._sent_t0_us: int | None = None
+        self._sent_dt_us: int | None = None
+        self._sent_n: int = 0
         self._saved_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None
         self._event_scale_hi = 1.0
         self._probe_roi_before: pg.ROI | None = None
@@ -607,10 +613,12 @@ class MainWindow(QMainWindow):
         self._bridge = _NetBridge(self)
         self._bridge.served.connect(self._on_blitz_downloaded)
         self._bridge.clients.connect(self._on_client_count)
+        self._bridge.viewer_index.connect(self._on_viewer_index)
 
         self.publisher = StackPublisher(host=host, port=port, token=token)
         self.publisher.on_served = lambda n: self._bridge.served.emit(n)
         self.publisher.on_client_count = lambda n: self._bridge.clients.emit(n)
+        self.publisher.on_viewer_index = lambda i: self._bridge.viewer_index.emit(i)
         self.publisher.start_background()
 
         self._build_ui()
@@ -1099,11 +1107,12 @@ class MainWindow(QMainWindow):
 
     def _update_connect_hint(self) -> None:
         self.connect_hint.setText(
-            f"BLITZ Stream: <b>{self.publisher.base_url}</b>  ·  token "
+            f"BLITZ / DONNER Stream: <b>{self.publisher.base_url}</b>  ·  token "
             f"<b>{self.publisher.token}</b>"
         )
         self.connect_hint.setToolTip(
-            "In BLITZ → Stream: Connect with that address and token, then send."
+            "In BLITZ → Stream or DONNER Source → Count: Connect with that "
+            "address and token, then send. DONNER wants Send as counts."
         )
 
     def _on_encode_options_changed(self) -> None:
@@ -1253,6 +1262,9 @@ class MainWindow(QMainWindow):
         self._overview_applied_sig = None
         self._overview_full_sig = None
         self._showing_activity = False
+        self._sent_t0_us = None
+        self._sent_dt_us = None
+        self._sent_n = 0
         self._crop_box = None
         self._crop_editing = False
         self._remove_crop_roi()
@@ -1387,6 +1399,65 @@ class MainWindow(QMainWindow):
             self._update_filter_stats(frame=idx)
         else:
             self.playhead_label.setText(f"t = {t_s:.4f} s")
+        self._maybe_push_playhead_index(t_s)
+
+    def _remember_sent_stack(self, params: BinParams | None, n_frames: int) -> None:
+        if params is None or n_frames <= 0:
+            return
+        t0 = int(params.t0_us) if params.t0_us is not None else None
+        if t0 is None and self._store is not None:
+            t0 = int(self._store.t_min)
+        if t0 is None:
+            return
+        self._sent_t0_us = t0
+        self._sent_dt_us = max(1, int(params.dt_us))
+        self._sent_n = int(n_frames)
+
+    def _on_viewer_index(self, index: int) -> None:
+        """BLITZ/DONNER scrub → move Event reader playhead onto that stack frame."""
+        if (
+            self._store is None
+            or self._sent_t0_us is None
+            or self._sent_dt_us is None
+            or self._sent_n <= 0
+        ):
+            return
+        t_s = stack_index_to_playhead_s(
+            int(index),
+            sent_t0_us=self._sent_t0_us,
+            sent_dt_us=self._sent_dt_us,
+            store_t_min=int(self._store.t_min),
+            duration_s=self._duration_s(),
+            n_frames=self._sent_n,
+        )
+        self._syncing_viewer_index = True
+        try:
+            self._set_playhead_s(t_s)
+        finally:
+            self._syncing_viewer_index = False
+
+    def _maybe_push_playhead_index(self, t_s: float) -> None:
+        """Event reader scrub → relay stack index to connected viewers."""
+        if (
+            self._syncing_viewer_index
+            or self._syncing_range
+            or self._store is None
+            or self._sent_t0_us is None
+            or self._sent_dt_us is None
+            or self._sent_n <= 0
+            or self._blitz_clients <= 0
+        ):
+            return
+        idx = playhead_s_to_stack_index(
+            t_s,
+            sent_t0_us=self._sent_t0_us,
+            sent_dt_us=self._sent_dt_us,
+            store_t_min=int(self._store.t_min),
+            n_frames=self._sent_n,
+        )
+        if idx is None:
+            return
+        self.publisher.push_index(idx)
 
     def _on_playhead_moved(self) -> None:
         if self._syncing_range:
@@ -2441,6 +2512,7 @@ class MainWindow(QMainWindow):
             self._write_npy(net, elapsed, hint)
             return
 
+        self._remember_sent_stack(params, int(net.shape[0]))
         self.publisher.set_stack(net, push=True)
         if self._blitz_clients <= 0:
             self._set_status(
