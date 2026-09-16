@@ -1,4 +1,4 @@
-"""RAM-based soft limits for picture stacks (no magic frame count)."""
+"""Soft limits for picture stacks: comfort zone, not share of installed RAM."""
 
 from __future__ import annotations
 
@@ -10,17 +10,33 @@ from typing import Literal
 WIRE_BYTES_PER_PIXEL = 2
 BUILD_BYTES_PER_PIXEL = 4  # 2 channels × uint16
 
-# Fractions of *installed* RAM (MemTotal / ullTotalPhys)
-YELLOW_FRAC = 1 / 8
-RED_FRAC = 1 / 4
+# Comfort / pain thresholds (absolute). Installed-RAM share is display-only.
+COMFORT_WIRE_BYTES = 2 * 1024**3  # yellow above this
+RED_WIRE_BYTES = 8 * 1024**3  # red at or above this
 
 # Refuse if the wire stack itself would not fit in *free* RAM
 WIRE_AVAILABLE_FRAC = 0.90
 
-# BLITZ timeline: more frames still work, but scrubbing stops being comfortable
+# Timeline: more frames still work, but scrubbing stops being comfortable
 NAV_WARN_FRAMES = 1000
+RED_WARN_FRAMES = 2000
+
+# Bar ticks as fractions of RED_WIRE_BYTES (fill = wire / RED_WIRE_BYTES)
+YELLOW_TICK = COMFORT_WIRE_BYTES / RED_WIRE_BYTES  # 0.25 → 2 GB
+RED_TICK = 1.0  # 8 GB
+
+# Kept for callers that still import old names (bar / tooltips).
+YELLOW_FRAC = YELLOW_TICK
+RED_FRAC = RED_TICK
 
 RamLevel = Literal["ok", "yellow", "red", "block"]
+
+_LEVEL_RANK: dict[RamLevel, int] = {
+    "ok": 0,
+    "yellow": 1,
+    "red": 2,
+    "block": 3,
+}
 
 BANNER_THEME: dict[RamLevel, tuple[str, str, str]] = {
     # background, foreground, headline tag
@@ -52,23 +68,45 @@ class StackBudget:
     n_frames: int
     height: int
     width: int
+    n_voxels: int
     wire_bytes: int
     build_bytes: int
     fraction_of_total: float
     level: RamLevel
     ram_level: RamLevel
     nav_warn: bool
+    wire_warn: bool
 
     def banner_theme(self) -> tuple[str, str, str]:
         bg, fg, tag = BANNER_THEME[self.level]
-        if self.nav_warn and self.ram_level == "ok":
-            return bg, fg, "MANY PICTURES"
+        if self.level == "ok":
+            return bg, fg, tag
+        if self.level == "yellow":
+            parts: list[str] = []
+            if self.wire_warn:
+                parts.append("LARGE")
+            if self.nav_warn:
+                parts.append("MANY PICTURES")
+            if parts:
+                return bg, fg, " · ".join(parts)
+            return bg, fg, tag
+        extras: list[str] = []
+        if self.wire_warn:
+            extras.append("LARGE")
         if self.nav_warn:
-            return bg, fg, f"{tag} · MANY PICTURES"
+            extras.append("MANY PICTURES")
+        if extras:
+            return bg, fg, f"{tag} · " + " · ".join(extras)
         return bg, fg, tag
 
     def fill_color(self) -> str:
         return FILL_COLOR[self.level]
+
+    def bar_fraction(self) -> float:
+        """Fill for the meter: wire size relative to the red comfort ceiling."""
+        if RED_WIRE_BYTES <= 0:
+            return 0.0
+        return self.wire_bytes / RED_WIRE_BYTES
 
 
 def read_ram() -> RamSnapshot:
@@ -138,6 +176,10 @@ def payload_bytes(n_frames: int, height: int, width: int, bytes_per: int) -> int
     return n * h * w * int(bytes_per)
 
 
+def _worse(a: RamLevel, b: RamLevel) -> RamLevel:
+    return a if _LEVEL_RANK[a] >= _LEVEL_RANK[b] else b
+
+
 def assess_stack(
     n_frames: int,
     height: int,
@@ -148,47 +190,65 @@ def assess_stack(
     build_itemsize: int | None = None,
 ) -> StackBudget:
     """
-    Colour the planned stack against installed RAM (default uint16 = 2 bytes/px).
+    Colour the planned stack against absolute comfort thresholds.
 
-    Yellow / red use the user's fractions of *total* RAM (stable).
+    OK: wire ≤ 2 GiB and ≤ 1000 pictures.
+    Yellow: above that (still allowed).
+    Red: wire ≥ 8 GiB or ≥ 2000 pictures (confirm); or build buffer tight on free RAM.
     ``block`` if the wire stack itself would not fit in *available* RAM.
-    If the ON/OFF uint16 build buffer is tight on free RAM, escalate to red.
+    Share of installed RAM is informational only — it does not pick the colour.
     """
     ram = ram if ram is not None else read_ram()
     n = max(1, int(n_frames))
+    h = max(0, int(height))
+    w = max(0, int(width))
     item = max(1, int(wire_itemsize))
     build_item = BUILD_BYTES_PER_PIXEL if build_itemsize is None else max(1, int(build_itemsize))
-    wire = payload_bytes(n, height, width, item)
-    build = payload_bytes(n, height, width, build_item)
+    wire = payload_bytes(n, h, w, item)
+    build = payload_bytes(n, h, w, build_item)
+    voxels = n * h * w
     frac = wire / ram.total if ram.total > 0 else 0.0
+
+    nav_warn = n > NAV_WARN_FRAMES
+    wire_warn = wire > COMFORT_WIRE_BYTES
+
     if ram.available > 0 and wire > WIRE_AVAILABLE_FRAC * ram.available:
-        level: RamLevel = "block"
-    elif frac >= RED_FRAC:
-        level = "red"
-    elif frac >= YELLOW_FRAC:
-        level = "yellow"
+        wire_level: RamLevel = "block"
+    elif wire >= RED_WIRE_BYTES:
+        wire_level = "red"
+    elif wire_warn:
+        wire_level = "yellow"
     else:
-        level = "ok"
+        wire_level = "ok"
+
+    if n >= RED_WARN_FRAMES:
+        frame_level: RamLevel = "red"
+    elif nav_warn:
+        frame_level = "yellow"
+    else:
+        frame_level = "ok"
+
+    level = _worse(wire_level, frame_level)
+    ram_level = wire_level
     if (
         level in ("ok", "yellow")
         and ram.available > 0
         and build > WIRE_AVAILABLE_FRAC * ram.available
     ):
         level = "red"
-    ram_level = level
-    nav_warn = n > NAV_WARN_FRAMES
-    if ram_level == "ok" and nav_warn:
-        level = "yellow"
+
     return StackBudget(
         n_frames=n,
-        height=int(height),
-        width=int(width),
+        height=h,
+        width=w,
+        n_voxels=voxels,
         wire_bytes=wire,
         build_bytes=build,
         fraction_of_total=frac,
         level=level,
         ram_level=ram_level,
         nav_warn=nav_warn,
+        wire_warn=wire_warn,
     )
 
 
@@ -201,3 +261,17 @@ def fmt_bytes(n: int) -> str:
     if n >= 1024:
         return f"{n / 1024:.0f} KB"
     return f"{n} B"
+
+
+def fmt_count(n: int) -> str:
+    """Compact count for voxel / picture headlines (921k, 138M)."""
+    n = max(0, int(n))
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.1f}B".replace(".0B", "B")
+    if n >= 1_000_000:
+        val = n / 1_000_000
+        return f"{val:.0f}M" if val >= 10 else f"{val:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        val = n / 1_000
+        return f"{val:.0f}k" if val >= 10 else f"{val:.1f}k".replace(".0k", "k")
+    return str(n)

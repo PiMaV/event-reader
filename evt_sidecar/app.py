@@ -10,7 +10,7 @@ from pathlib import Path
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="EVT Sidecar: EVT3 → frame stacks for BLITZ (WOLKE contract)",
+        description="EVT Sidecar: EVT3 → frame stacks for BLITZ / DONNER (WOLKE contract)",
     )
     parser.add_argument(
         "raw",
@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--host", default="127.0.0.1", help="Listen address")
     parser.add_argument("--port", type=int, default=5055, help="Listen port")
-    parser.add_argument("--token", default="evt", help="BLITZ Stream token")
+    parser.add_argument("--token", default="evt", help="Stream token (BLITZ / DONNER)")
     parser.add_argument(
         "-v",
         "--verbose",

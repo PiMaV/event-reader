@@ -11,10 +11,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - CORS on the `.npy` HTTP GET (`Access-Control-Allow-Origin` echoes the browser Origin, plus OPTIONS and `Access-Control-Allow-Private-Network`) so DONNER can fetch the cube from another origin, including `https://lab.ole.icu` → loopback.
 - Hub playhead relay: on `viewer_index`, rebroadcast `send_file_message` with `index` to other connected viewers (skip emitter) so BLITZ and DONNER can dual-scrub one stack.
 - Event reader timeline follows BLITZ/DONNER `viewer_index` (maps last-sent stack frame → playhead). Scrubbing the white playhead inside that window pushes `index` back to connected viewers.
+- Send panel shows **dense voxel count** of the finished cube (`T × H × W`) next to wire bytes and picture count.
 
 ### Changed
 
 - Stream viewers: **BLITZ or DONNER**. DONNER uses the same WOLKE contract; **Send as counts** is the cube that matches its LUT.
+- Send readiness uses an absolute **comfort zone** (yellow above **2 GiB** wire or **1000** pictures; red at **8 GiB** or **2000** pictures) instead of fractions of installed RAM. Large sends stay allowed with confirm; only free-RAM overflow still blocks.
+- UI copy treats Event reader as a **hub**: one send button, Stream status for any connected viewer (not “BLITZ only”).
+- Preview RAM confirm uses crop + spatial-bin size (`_send_hw`), same as the send plan.
 
 ## [1.0.1] - 2026-08-31
 

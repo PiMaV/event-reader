@@ -1,4 +1,4 @@
-"""PyQt6 event-reader UI: overview → range → Δt → send to BLITZ."""
+"""PyQt6 event-reader UI: overview → range → Δt → send to viewers."""
 
 from __future__ import annotations
 
@@ -74,13 +74,17 @@ from .binning import (
 from .evt3 import EventStore, load_evt3_raw
 from .filters import drop_isolated_pixels
 from .ram import (
+    COMFORT_WIRE_BYTES,
     FILL_COLOR,
     NAV_WARN_FRAMES,
     RED_FRAC,
+    RED_WARN_FRAMES,
+    RED_WIRE_BYTES,
     YELLOW_FRAC,
     StackBudget,
     assess_stack,
     fmt_bytes,
+    fmt_count,
     read_ram,
 )
 from .playhead_sync import playhead_s_to_stack_index, stack_index_to_playhead_s
@@ -208,7 +212,7 @@ _STATUS_THEME = {
 
 
 class _Led(QFrame):
-    """Status banner (load / bin / BLITZ) in the Send panel."""
+    """Status banner (load / bin / Stream) in the Send panel."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -241,7 +245,7 @@ class _Led(QFrame):
         self.headline.setFont(head_font)
         self.label = QLabel(
             "Drop a .raw file or Open RAW…. This bar shows decoding, send, "
-            "and BLITZ Stream status."
+            "and Stream viewer status."
         )
         self.label.setWordWrap(True)
         self.label.setMaximumHeight(48)
@@ -305,7 +309,7 @@ class _Led(QFrame):
 
 
 class _RamBar(QWidget):
-    """Horizontal meter: fill = stack / installed RAM, ticks at 1/8 and 1/4."""
+    """Horizontal meter: fill = wire / 8 GB red ceiling; ticks at 2 GB and 8 GB."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -349,8 +353,8 @@ class _RamBar(QWidget):
         font.setPointSize(max(8, font.pointSize() - 1))
         painter.setFont(font)
         painter.setPen(QColor("#ffffff"))
-        painter.drawText(px(YELLOW_FRAC) + 5, h - 8, "1/8")
-        painter.drawText(px(RED_FRAC) + 5, h - 8, "1/4")
+        painter.drawText(px(YELLOW_FRAC) + 5, h - 8, "2 GB")
+        painter.drawText(px(RED_FRAC) + 5, h - 8, "8 GB")
 
 
 class _RamBanner(QFrame):
@@ -386,25 +390,37 @@ class _RamBanner(QFrame):
         self.headline.setText(
             f"{tag}   ·   {budget.fraction_of_total:.0%} of {fmt_bytes(ram.total)} RAM"
         )
-        self.bar.set_fraction(budget.fraction_of_total, budget.level)
+        self.bar.set_fraction(budget.bar_fraction(), budget.level)
         notes = {
-            "ok": "Fits comfortably.",
-            "yellow": "Large — BLITZ will feel it, but this should still run.",
-            "red": "Huge — confirm before send. BLITZ holds another copy.",
+            "ok": "Fits comfortably (≤ 2 GB and ≤ 1000 pictures).",
+            "yellow": (
+                "Large — viewers will feel it, but this should still run. "
+                "Allowed if you need it."
+            ),
+            "red": (
+                "Huge — confirm before send. Viewers hold another copy; "
+                "scrubbing and 3D get slow."
+            ),
             "block": "Will not send: pictures would not fit in free RAM.",
         }
-        nav = ""
+        extra = ""
         if budget.nav_warn:
-            nav = (
-                f" {budget.n_frames} pictures — above {NAV_WARN_FRAMES} the BLITZ "
-                "timeline is very fine-grained. Allowed, but only if you know "
-                "you need it."
+            extra += (
+                f" {budget.n_frames} pictures — above {NAV_WARN_FRAMES} the "
+                "viewer timeline is very fine-grained."
             )
+        if budget.wire_warn:
+            extra += (
+                f" Wire {fmt_bytes(budget.wire_bytes)} is above the "
+                f"{fmt_bytes(COMFORT_WIRE_BYTES)} comfort mark."
+            )
+        shape = f"{budget.n_frames} × {budget.height} × {budget.width}"
         self.detail.setText(
             f"{fmt_bytes(budget.wire_bytes)} on the wire  ·  "
+            f"{fmt_count(budget.n_voxels)} voxels ({shape})  ·  "
             f"{budget.n_frames} pictures  ·  "
             f"~{fmt_bytes(budget.build_bytes)} to bin (2×uint16 ON/OFF)  ·  "
-            f"{fmt_bytes(ram.available)} free.  {notes[budget.level]}{nav}"
+            f"{fmt_bytes(ram.available)} free.  {notes[budget.level]}{extra}"
         )
 
     def _apply_colors(self, bg: str, fg: str) -> None:
@@ -443,7 +459,7 @@ OVERVIEW_HELP = (
     "Wheel or the white playhead scrubs pictures (like BLITZ). "
     "Ctrl+wheel or right-drag zooms time. Yellow band = the range you send "
     "(it also writes a 1-2-5 Δt). Typing Δt updates the RAM plan only. "
-    "O rebuilds that band at the Δt in panel 2 (same Δt BLITZ gets). "
+    "O rebuilds that band at the Δt in panel 2 (same Δt the cube gets). "
     "Esc or double-click the plot restores the coarse full-file overview. "
     "Left = unfiltered, right = noise filters. Pan/zoom stay locked. "
     "Yellow box on the pictures is the time-series probe (plot = event count "
@@ -455,8 +471,8 @@ OVERVIEW_HELP = (
     "green rectangle (zoom is slightly out so the handles sit in the blue). "
     "Apply crop when it fits — mouse-up does not lock the crop. "
     "Spatial bin (2×2 / 4×4 / 8×8) pools sensor pixels when you do not "
-    "need the full resolution. Panel 3 sends that cube to BLITZ or "
-    "saves it as NumPy (same bytes)."
+    "need the full resolution. Panel 3 sends that cube to BLITZ or DONNER, "
+    "or saves it as NumPy (same bytes)."
 )
 
 
@@ -533,7 +549,7 @@ class MainWindow(QMainWindow):
         initial_raw: Path | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("Event reader → BLITZ")
+        self.setWindowTitle("Event reader → BLITZ / DONNER")
         self.resize(720, 940)
 
         self._store: EventStore | None = None
@@ -874,7 +890,7 @@ class MainWindow(QMainWindow):
         self.restag_btn.setEnabled(False)
         self.restag_btn.setToolTip(
             "Zoom to the yellow band and re-bin at the Δt in panel 2 — the "
-            "same pictures you will send to BLITZ. Moving the yellow band "
+            "same pictures you will send. Moving the yellow band "
             "writes a 1-2-5 Δt (~150 pictures) into the spinbox; typing Δt "
             "updates the RAM plan only until you Rebuild or send. Full "
             "recording restores the coarse full-file overview."
@@ -913,7 +929,7 @@ class MainWindow(QMainWindow):
             "plan only — Rebuild (O) and send re-bin at this Δt. Moving the "
             "yellow band writes a 1-2-5 value (~150 pictures). Sensor "
             "timestamps step by 1 µs (0.001 ms). Picture count is limited "
-            "only by RAM (yellow/red bar in Send to BLITZ)."
+            "by the comfort bar in Send (yellow above 2 GB or 1000 pictures)."
         )
         self.dt_ms.valueChanged.connect(self._on_dt_changed)
         form.addRow("Frame time (Δt)", self.dt_ms)
@@ -959,12 +975,12 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
         )
         self.representation.setToolTip(
-            "What BLITZ holds — the pictures here use a matching legend. "
+            "What the cube holds — the pictures here use a matching legend. "
             "States (default): polarity as red / green / yellow; cube is "
             "uint8 0 / 85 / 170 / 255 (nothing / OFF / ON / both). "
             "Counts: Inferno for how many events; cube is uint16 activity "
-            "(ON+OFF). Occupancy: black / white fired-or-not; cube is "
-            "uint8 0 or 255."
+            "(ON+OFF) — prefer this for DONNER. Occupancy: black / white "
+            "fired-or-not; cube is uint8 0 or 255."
         )
         self.representation.currentIndexChanged.connect(self._on_send_as_changed)
         form.addRow("Send as", self.representation)
@@ -987,7 +1003,7 @@ class MainWindow(QMainWindow):
         self.grayscale_box.setChecked(True)
         self.grayscale_box.setEnabled(False)
         self.grayscale_box.setToolTip(
-            "Always on: the BLITZ cube is one channel. "
+            "Always on: the cube is one channel. "
             "Colour here is the Send-as legend (not the cube)."
         )
         encode_wrap = QWidget()
@@ -1040,17 +1056,18 @@ class MainWindow(QMainWindow):
         step3 = QGroupBox("3 — Send or save")
         s3 = QVBoxLayout(step3)
         s3.setContentsMargins(8, 8, 8, 8)
-        self.apply_btn = QPushButton("Build pictures and send to BLITZ")
+        self.apply_btn = QPushButton("Build pictures and send")
         self.apply_btn.setEnabled(False)
         self.apply_btn.setToolTip(
-            "BLITZ does not update while you scrub. Connect Stream first, "
-            "then send. Green status = BLITZ downloaded the stack."
+            "Viewers do not update while you scrub. Connect Stream in "
+            "BLITZ or DONNER first, then send. Green status = a viewer "
+            "downloaded the stack. DONNER wants Send as counts."
         )
         self.apply_btn.clicked.connect(self._export_to_blitz)
         self.save_npy_btn = QPushButton("Save as NumPy…")
         self.save_npy_btn.setEnabled(False)
         self.save_npy_btn.setToolTip(
-            "Write the same cube a BLITZ send would hold (Send as, crop, "
+            "Write the same cube a Stream send would hold (Send as, crop, "
             "Δt, filters, 8-bit / Normalize). Does not need Stream."
         )
         self.save_npy_btn.clicked.connect(self._save_as_npy)
@@ -1527,8 +1544,6 @@ class MainWindow(QMainWindow):
         h, w = self._send_hw()
         budget = assess_stack(n, h, w, ram, wire_itemsize=itemsize)
         self._stack_budget = budget
-        y_b = YELLOW_FRAC * ram.total
-        r_b = RED_FRAC * ram.total
         crop = self._crop_xyxy()
         if crop is None:
             crop_txt = f"full sensor {self._store.width}×{self._store.height}"
@@ -1551,13 +1566,14 @@ class MainWindow(QMainWindow):
             f"Timestamps step by {SENSOR_DT_US} µs. "
             f"Selected {t0_s:.4f}–{t1_s:.4f} s ({span_s:.3f} s). "
             f"Δt = {dt_us / 1000.0:.3f} ms → {n} pictures (Rebuild (O) "
-            f"and BLITZ send use this). "
+            f"and send use this). "
             f"Suggested (1-2-5, ~{OVERVIEW_PICTURES} pictures): "
             f"{sug_us / 1000.0:.3f} ms ({sug_n} pics). "
             f"{crop_txt}. {filt_txt}. "
-            f"Yellow ≥ {fmt_bytes(int(y_b))} (1/8 RAM), "
-            f"red ≥ {fmt_bytes(int(r_b))} (1/4 RAM). "
-            f"Above {NAV_WARN_FRAMES} pictures BLITZ becomes uncomfortable to scrub."
+            f"Comfort: yellow above {fmt_bytes(COMFORT_WIRE_BYTES)} or "
+            f"{NAV_WARN_FRAMES} pictures; red at "
+            f"{fmt_bytes(RED_WIRE_BYTES)} or {RED_WARN_FRAMES} pictures. "
+            f"Dense voxels = T×H×W of the finished cube."
         )
         self.ram_banner.set_budget(budget, ram)
         self._style_send_button(budget.level)
@@ -1575,7 +1591,7 @@ class MainWindow(QMainWindow):
             return
         self.apply_btn.setEnabled(ready)
         self.save_npy_btn.setEnabled(ready)
-        self.apply_btn.setText("Build pictures and send to BLITZ")
+        self.apply_btn.setText("Build pictures and send")
         if level == "yellow":
             self.apply_btn.setStyleSheet(
                 "QPushButton { background:#f1c40f; color:#1a1400; font-weight:bold; "
@@ -2085,21 +2101,25 @@ class MainWindow(QMainWindow):
             tip = (
                 "Polarity in this Δt: black = nothing, red = OFF, "
                 "green = ON, yellow = both. "
-                "BLITZ gets one uint8 channel: 0 / 85 / 170 / 255."
+                "Cube is one uint8 channel: 0 / 85 / 170 / 255."
             )
         elif rep == Representation.OCCUPANCY:
             short = "Occupancy: black = nothing · white = fired"
             tip = (
                 "Binary who-fired. Preview is black / white. "
-                "BLITZ gets uint8 0 or 255 (any polarity)."
+                "Cube is uint8 0 or 255 (any polarity)."
             )
         else:
             n = max(1, int(round(float(self._event_scale_hi))))
-            short = f"Counts: Inferno  ·  rungs 0…{n} events/pixel  ·  BLITZ gets uint16"
+            short = (
+                f"Counts: Inferno  ·  rungs 0…{n} events/pixel  ·  "
+                "cube uint16 (DONNER)"
+            )
             tip = (
                 f"How many events (ON+OFF) in this Δt. Inferno: dark = none, "
                 f"bright = many. Rungs 0…{n} (p99 of unfiltered). "
-                "BLITZ receives uint16 activity. Its LUT is separate."
+                "Cube is uint16 activity — prefer this for DONNER. "
+                "BLITZ LUT is separate."
             )
         self.color_legend.setToolTip(tip)
         return short
@@ -2151,10 +2171,11 @@ class MainWindow(QMainWindow):
         dt_us, n, _u = plan_pictures(t1 - t0, dt_us=self._user_dt_us())
         ram = read_ram()
         itemsize = self._wire_itemsize()
+        h, w = self._send_hw()
         return assess_stack(
             n,
-            self._store.height,
-            self._store.width,
+            h,
+            w,
             ram,
             wire_itemsize=itemsize,
         )
@@ -2172,7 +2193,7 @@ class MainWindow(QMainWindow):
                 "Raise Δt, shrink the yellow band, or crop.",
             )
             return False
-        if budget.level != "red" and not budget.nav_warn:
+        if budget.level == "ok":
             return True
         parts: list[str] = []
         if budget.nav_warn:
@@ -2180,11 +2201,23 @@ class MainWindow(QMainWindow):
                 f"{budget.n_frames} pictures — more than {NAV_WARN_FRAMES} is "
                 "not comfortable to scrub. Continue only if you know you need this."
             )
+        if budget.wire_warn and budget.level == "yellow":
+            parts.append(
+                f"{fmt_bytes(budget.wire_bytes)} is above the "
+                f"{fmt_bytes(COMFORT_WIRE_BYTES)} comfort mark "
+                f"({fmt_count(budget.n_voxels)} voxels). "
+                "Viewers will hold another copy."
+            )
         if budget.level == "red":
             parts.append(
-                f"{fmt_bytes(budget.wire_bytes)} is "
-                f"{budget.fraction_of_total:.0%} of this PC's RAM. "
-                "BLITZ will hold another copy if you send."
+                f"{fmt_bytes(budget.wire_bytes)} / {budget.n_frames} pictures "
+                f"({fmt_count(budget.n_voxels)} voxels) is past the red mark "
+                f"({fmt_bytes(RED_WIRE_BYTES)} or {RED_WARN_FRAMES} pictures). "
+                "Viewers hold another copy; scrubbing and 3D get slow."
+            )
+        if not parts:
+            parts.append(
+                f"{fmt_bytes(budget.wire_bytes)} on {place} looks large. Continue?"
             )
         yes = QMessageBox.warning(
             self,
@@ -2478,7 +2511,7 @@ class MainWindow(QMainWindow):
                 self._set_status(
                     "ok",
                     f"Preview ready ({n} pictures, {dt_ms:.3f} ms each) — "
-                    f"same Δt as a BLITZ send.{self._filter_status_suffix()}"
+                    f"same Δt as a send.{self._filter_status_suffix()}"
                     f"{hint} "
                     "Left unfiltered, right filtered. "
                     "The plot is the yellow-box ROI (cyan unfiltered, "
@@ -2494,7 +2527,7 @@ class MainWindow(QMainWindow):
                     "The plot is the yellow-box ROI (cyan unfiltered, "
                     "gold filtered). "
                     "Scrub the timeline, set the yellow start/end, choose Δt, "
-                    "then send to BLITZ.",
+                    "then send.",
                 )
             self._refresh_plan_label()
             self._set_preview_busy(False)
@@ -2517,11 +2550,12 @@ class MainWindow(QMainWindow):
         if self._blitz_clients <= 0:
             self._set_status(
                 "wait",
-                "3/3 Pictures ready — connect BLITZ Stream, or wait for download…"
+                "3/3 Pictures ready — connect Stream (BLITZ or DONNER), "
+                "or wait for download…"
                 + hint,
             )
         else:
-            self._set_status("wait", "3/3 Sending to BLITZ…" + hint)
+            self._set_status("wait", "3/3 Sending to viewers…" + hint)
         self.statusBar().showMessage(
             f"Sent {tuple(net.shape)} in {elapsed * 1000:.0f} ms{hint}"
         )
@@ -2606,7 +2640,7 @@ class MainWindow(QMainWindow):
         self._refresh_plan_label()
         if not self._confirm_stack(self._stack_budget, preview=False):
             return
-        self._set_status("work", "2/3 Building pictures for BLITZ…")
+        self._set_status("work", "2/3 Building pictures for Stream…")
         self._start_bin(self._export_params(), "export")
 
     def _default_npy_name(self) -> str:
@@ -2668,7 +2702,7 @@ class MainWindow(QMainWindow):
 
     def _on_blitz_downloaded(self, nbytes: int) -> None:
         mb = nbytes / (1024 * 1024)
-        self._set_status("ok", f"BLITZ received the stack ({mb:.1f} MB)")
+        self._set_status("ok", f"Viewer received the stack ({mb:.1f} MB)")
 
     def _on_client_count(self, n: int) -> None:
         prev = self._blitz_clients
@@ -2677,9 +2711,9 @@ class MainWindow(QMainWindow):
             return
         detail = self.led.label.text()
         if n > 0:
-            suffix = f"BLITZ Stream connected ({n})"
+            suffix = f"viewer connected ({n})"
         else:
-            suffix = "waiting for BLITZ Stream"
+            suffix = "waiting for Stream"
         self.statusBar().showMessage(
             f"Serving {self.publisher.base_url}  ·  {suffix}"
         )
@@ -2687,13 +2721,14 @@ class MainWindow(QMainWindow):
             return
         if n > 0:
             if "Pictures ready" in detail or "Sending" in detail or "download" in detail.lower():
-                self._set_status("wait", "BLITZ Stream connected — downloading…")
+                self._set_status("wait", "Stream connected — downloading…")
             else:
-                self._set_status("ok", "BLITZ Stream connected — send when ready.")
+                self._set_status("ok", "Stream connected — send when ready.")
         elif prev > 0:
             self._set_status(
                 "wait",
-                "BLITZ Stream disconnected — Connect in BLITZ → Stream.",
+                "Stream disconnected — Connect in BLITZ → Stream or "
+                "DONNER Source → Count.",
             )
 
     def _on_bin_failed(self, message: str) -> None:

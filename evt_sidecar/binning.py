@@ -1,4 +1,4 @@
-"""Accumulate CD events into ON/OFF count planes, then view for BLITZ."""
+"""Accumulate CD events into ON/OFF count planes, then view for Stream."""
 
 from __future__ import annotations
 
@@ -278,7 +278,7 @@ def stack_for_send(
     polarity: PolarityMode | str = PolarityMode.COLOR,
     representation: Representation | str = Representation.STATES,
 ) -> np.ndarray:
-    """Cube for BLITZ — always one channel, never RGB.
+    """Cube for BLITZ / DONNER — always one channel, never RGB.
 
     States (default): uint8 0 / 85 / 170 / 255 (none / OFF / ON / both).
     Counts: uint16 (ON+OFF, ON, OFF) or int16 signed; color polarity → activity.

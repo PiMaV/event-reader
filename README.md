@@ -37,8 +37,8 @@ flowchart TD
 
 - Drop a `.raw`, scrub a coarse overview, tighten the **yellow band**, **Rebuild (O)** at the send Δt.
 - **Crop**, **spatial bin**, optional noise filters (before / after).
-- **Send as** is the one choice for what BLITZ (or the `.npy`) holds — the pictures use a matching legend.
-- **Build pictures and send to BLITZ**, or **Save as NumPy…** (same cube).
+- **Send as** is the one choice for what the cube (or `.npy`) holds — the pictures use a matching legend.
+- **Build pictures and send**, or **Save as NumPy…** (same cube). Stream clients are **BLITZ** and/or **DONNER**.
 
 Internally the reader always bins **ON and OFF counts** (`uint16`). Send as is a view of those planes — switching it does not re-bin.
 
@@ -80,7 +80,9 @@ Run the binary (optional path to a `.raw`). On Windows a console window stays op
 
 ## Use with BLITZ or DONNER
 
-Nothing is sent until you click **Build pictures and send to BLITZ**. Status and RAM live in panel **3 — Send or save**.
+Nothing is sent until you click **Build pictures and send**. Status and the comfort / RAM bar live in panel **3 — Send or save**.
+
+**Comfort (not share of installed RAM):** green while the wire cube is ≤ **2 GiB** and ≤ **1000** pictures; yellow above that; red from **8 GiB** or **2000** pictures (confirm, still allowed). Send only blocks when the wire would not fit in *free* RAM. The bar also shows dense **voxels** `T × H × W` of the finished package (crop and spatial bin shrink that number).
 
 1. **Open** a `.raw` (drop it, **Open RAW…**, or pass the path). Two pictures: left unfiltered, right after filters. Default view is the **whole frame** (slate-blue letterbox). Dropping a folder loads the first `.raw` in it. A new file resets Δt, filters, Send as, and crop.
 2. **Scrub** with the playhead or the wheel. Time is **seconds from the first event in this file** (EVT3 ticks are 1 µs).
@@ -88,10 +90,12 @@ Nothing is sent until you click **Build pictures and send to BLITZ**. Status and
 4. Drag the **yellow band** to the send range. That writes a 1-2-5 **Δt** (~150 pictures). Typing Δt updates the RAM plan only; **Rebuild (O)** and send re-bin.
 5. **Crop (M)** after the band: move the green rectangle, **Apply crop**. **Reset crop** returns to the full sensor.
 6. Panel **2**: **Δt**, **spatial bin**, **Send as**, optional 8-bit / Normalize, optional noise filters. Neighbour filter runs on tick, Rebuild, and send — not while you drag the band.
-7. Panel **3**: **send to BLITZ**, or **Save as NumPy…**. In BLITZ → **Stream**, or DONNER Source → Count → **Stream**: `http://127.0.0.1:5055`, token `evt` → Connect. DONNER wants **Send as counts** (`uint16` activity).
+7. Panel **3**: **Build pictures and send**, or **Save as NumPy…**. In BLITZ → **Stream**, or DONNER Source → Count → **Stream**: `http://127.0.0.1:5055`, token `evt` → Connect. DONNER wants **Send as counts** (`uint16` activity).
 8. After a send, **playhead sync**: scrubbing in BLITZ (or DONNER) moves the white timeline here to that stack frame; scrubbing the playhead inside the last-sent window pushes the frame index back to connected viewers.
 
 Black pixels are a measured zero. The plot is **event count in the yellow box** (cyan unfiltered, gold filtered). Even/odd row imbalance is reported in the status bar (sensor readout, not the decoder).
+
+For agents: compact product brief in [`docs/llm-brief.md`](docs/llm-brief.md).
 
 | Send as | Preview | Cube |
 |---------|---------|------|
