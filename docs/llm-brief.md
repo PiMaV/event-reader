@@ -46,11 +46,13 @@ Banner also shows **dense voxel count** of the finished cube. Process RSS (Qt, t
 
 | Path | Role |
 |------|------|
-| `evt_sidecar/gui.py` | PyQt UI, send plan, comfort banner |
+| `evt_sidecar/gui.py` | PyQt UI, send plan, comfort banner, About |
 | `evt_sidecar/ram.py` | `assess_stack`, comfort thresholds, `fmt_count` |
 | `evt_sidecar/binning.py` | Bin + Send-as views + encode |
 | `evt_sidecar/server.py` | Hub Socket.IO + HTTP `.npy` |
 | `evt_sidecar/playhead_sync.py` | Frame index ↔ timeline |
+
+Guides (off by default): **How this works** / **RAW header** / **About** (version, license, WETTER links).
 
 ## Contracts
 

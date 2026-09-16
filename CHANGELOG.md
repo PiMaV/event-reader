@@ -6,12 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-16
+
 ### Added
 
 - CORS on the `.npy` HTTP GET (`Access-Control-Allow-Origin` echoes the browser Origin, plus OPTIONS and `Access-Control-Allow-Private-Network`) so DONNER can fetch the cube from another origin, including `https://lab.ole.icu` → loopback.
 - Hub playhead relay: on `viewer_index`, rebroadcast `send_file_message` with `index` to other connected viewers (skip emitter) so BLITZ and DONNER can dual-scrub one stack.
 - Event reader timeline follows BLITZ/DONNER `viewer_index` (maps last-sent stack frame → playhead). Scrubbing the white playhead inside that window pushes `index` back to connected viewers.
 - Send panel shows **dense voxel count** of the finished cube (`T × H × W`) next to wire bytes and picture count.
+- **About** toggle (next to How this works): version, license, and WETTER / BLITZ / DONNER links.
 
 ### Changed
 
@@ -65,6 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - CI test jobs install Qt runtime libraries (`libegl1`, …) so pyqtgraph can import on GitHub runners.
 
-[Unreleased]: https://github.com/PiMaV/event-reader/compare/build-v1.0.1...HEAD
+[Unreleased]: https://github.com/PiMaV/event-reader/compare/build-v1.1.0...HEAD
+[1.1.0]: https://github.com/PiMaV/event-reader/compare/build-v1.0.1...build-v1.1.0
 [1.0.1]: https://github.com/PiMaV/event-reader/compare/build-v1.0.0...build-v1.0.1
 [1.0.0]: https://github.com/PiMaV/event-reader/compare/build-0.2.0-1...build-v1.0.0

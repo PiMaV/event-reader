@@ -73,6 +73,7 @@ from .binning import (
 )
 from .evt3 import EventStore, load_evt3_raw
 from .filters import drop_isolated_pixels
+from . import __version__
 from .ram import (
     COMFORT_WIRE_BYTES,
     FILL_COLOR,
@@ -475,6 +476,20 @@ OVERVIEW_HELP = (
     "or saves it as NumPy (same bytes)."
 )
 
+ABOUT_HTML = (
+    f"<b>Event reader {__version__}</b> — WETTER framework<br/>"
+    "EVT3 archive → dense stack hub for <b>BLITZ</b> (2D) and <b>DONNER</b> (3D). "
+    "Same WOLKE Viewer Contract. Not Metavision / MDK; not part of the BLITZ Flatpak.<br/>"
+    "License: GPL-3.0-or-later · "
+    '<a href="https://wetter.mess.engineering">wetter.mess.engineering</a> · '
+    '<a href="https://github.com/PiMaV/event-reader">github.com/PiMaV/event-reader</a><br/>'
+    "Viewers: "
+    '<a href="https://github.com/PiMaV/BLITZ">BLITZ</a> · '
+    '<a href="https://github.com/PiMaV/DONNER">DONNER</a> · '
+    "Stream default <code>http://127.0.0.1:5055</code>, token <code>evt</code>. "
+    "DONNER wants <b>Send as counts</b>."
+)
+
 
 def preview_contain_ranges(
     width: float,
@@ -752,8 +767,15 @@ class MainWindow(QMainWindow):
         self.help_btn.setToolTip(
             "Short guide. Hover any control for the same detail in a tooltip."
         )
+        self.about_btn = QToolButton()
+        self.about_btn.setText("About")
+        self.about_btn.setCheckable(True)
+        self.about_btn.setToolTip(
+            "Version, license, and links to WETTER / BLITZ / DONNER."
+        )
         meta_row.addWidget(self.header_btn)
         meta_row.addWidget(self.help_btn)
+        meta_row.addWidget(self.about_btn)
         layout.addLayout(meta_row)
 
         self.file_preview = QPlainTextEdit()
@@ -771,6 +793,14 @@ class MainWindow(QMainWindow):
         self.help_text.hide()
         self.help_btn.toggled.connect(self.help_text.setVisible)
         layout.addWidget(self.help_text)
+
+        self.about_text = QLabel(ABOUT_HTML)
+        self.about_text.setWordWrap(True)
+        self.about_text.setOpenExternalLinks(True)
+        self.about_text.setTextFormat(Qt.TextFormat.RichText)
+        self.about_text.hide()
+        self.about_btn.toggled.connect(self.about_text.setVisible)
+        layout.addWidget(self.about_text)
 
         step1 = QGroupBox("1 — Overview")
         s1 = QVBoxLayout(step1)

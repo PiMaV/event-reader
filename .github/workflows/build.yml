@@ -142,15 +142,21 @@ jobs:
             dist/EventReader
           fail_on_unmatched_files: true
           body: |
-            **First fully available** EVT3 `.raw` → BLITZ line (WOLKE Network contract).
+            **Event reader ${{ needs.windows.outputs.version }}** — EVT3 `.raw` →
+            dense stack hub for **BLITZ** and **DONNER** (WOLKE Viewer Contract).
 
             Open a recording, inspect it locally, then send a cube or save NumPy.
             No Metavision / MDK.
 
             1. Run `EventReader` / `EventReader.exe` (optional path to a `.raw` file).
-            2. Yellow band, Δt, crop, **Send as** — then **Build pictures and send to BLITZ**
+            2. Yellow band, Δt, crop, **Send as** — then **Build pictures and send**
                or **Save as NumPy…**.
-            3. In BLITZ → Stream: `http://127.0.0.1:5055`, token `evt` → Connect.
+            3. In BLITZ → Stream, or DONNER Source → Count → Stream:
+               `http://127.0.0.1:5055`, token `evt` → Connect.
+               DONNER wants **Send as counts**.
+
+            Comfort: yellow above 2 GiB or 1000 pictures; red at 8 GiB or 2000.
+            Send panel shows dense voxels `T × H × W`.
 
             Default **states**: uint8 0 / 85 / 170 / 255 (nothing / OFF / ON / both).
             Counts are uint16 activity; occupancy is uint8 binary.

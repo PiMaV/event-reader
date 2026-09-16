@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)]()
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)]()
 
-> **v1.0** — first fully available EVT3 `.raw` → [BLITZ](https://github.com/PiMaV/BLITZ) line.
+> **v1.1.0** — EVT3 `.raw` hub for [BLITZ](https://github.com/PiMaV/BLITZ) and [DONNER](https://github.com/PiMaV/DONNER); comfort send readiness and dense voxel count.
 
 ![Event reader GUI](GUI.png)
 
@@ -32,6 +32,12 @@ flowchart TD
   filt --> crop[Crop plus spatial bin]
   crop --> out[Send to BLITZ or DONNER or save NumPy]
 ```
+
+## What’s in 1.1
+
+- Comfort send readiness (2 GiB / 1000 pictures), dense voxel count on the send bar.
+- Hub Stream for **BLITZ** and **DONNER**; playhead sync across viewers.
+- Guides: **How this works** / **RAW header** / **About** (version, license, links).
 
 ## What’s in 1.0
 
@@ -74,7 +80,7 @@ One-file binaries (no Python; about 140 MB, Qt + NumPy + Numba):
 - **Windows:** `EventReader.exe`
 - **Ubuntu / Linux:** `EventReader`
 
-from [GitHub Releases](https://github.com/PiMaV/event-reader/releases) — start at **[1.0.1](https://github.com/PiMaV/event-reader/releases/tag/build-v1.0.1)**.
+from [GitHub Releases](https://github.com/PiMaV/event-reader/releases) — start at **[1.1.0](https://github.com/PiMaV/event-reader/releases/tag/build-v1.1.0)**.
 
 Run the binary (optional path to a `.raw`). On Windows a console window stays open for logs.
 
@@ -145,7 +151,7 @@ uv run pyinstaller EventReader.spec --noconfirm --clean
 
 On Ubuntu: `sudo apt-get install -y libgl1 libglx-mesa0 libxcb-cursor0 libegl1` (or `./scripts/build.sh`).
 
-GitHub Actions **Build Event reader** (`workflow_dispatch`, or a `build*` tag such as `build-v1.0.1`) publishes `EventReader.exe` and `EventReader` on the Release.
+GitHub Actions **Build Event reader** (`workflow_dispatch`, or a `build*` tag such as `build-v1.1.0`) publishes `EventReader.exe` and `EventReader` on the Release.
 
 ## Later / parked
 
