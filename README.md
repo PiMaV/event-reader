@@ -1,11 +1,6 @@
 # Event reader
 
-[![Release](https://img.shields.io/github/v/release/PiMaV/event-reader)](https://github.com/PiMaV/event-reader/releases/latest)
-[![License](https://img.shields.io/github/license/PiMaV/event-reader)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)]()
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)]()
-
-> **v1.1.0** — EVT3 `.raw` hub for [BLITZ](https://github.com/PiMaV/BLITZ) and [DONNER](https://github.com/PiMaV/DONNER); comfort send readiness and dense voxel count.
+> **v1.1.0** — EVT3 `.raw` hub for [BLITZ](https://github.com/PiMaV/BLITZ) and [DONNER](https://github.com/PiMaV/DONNER)
 
 ![Event reader GUI](GUI.png)
 
